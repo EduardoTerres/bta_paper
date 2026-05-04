@@ -1,0 +1,14 @@
+boolean_composition/*pyc
+boolean_composition/exps_data/
+boolean_composition/exps_data_extension/
+boolean_composition/*.png
+
+skill_machines/log
+skill_machines/*log
+skill_machines/log*
+skill_machines/data/
+skill_machines/#*data/
+skill_machines/__pycache__/
+skill_machines/*__pycache__/
+skill_machines/MUJOCO_LOG.TXT
+skill_machines/*MUJOCO_LOG.TXT
