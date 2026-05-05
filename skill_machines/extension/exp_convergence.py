@@ -101,10 +101,10 @@ TASKS = {
         "(F (m & X (F (o & X (~ m U (~ tm & m & X (F (c & X (~ o U (~ to & o & X "
         "(F (A & X (F (B & X (F (C & X (F (D & X (F A))))))))))))))))))) & (G~d)",
 }
-MAX_ITERS     = [1_000, 5_000, 10_000, 50_000, 100_000, 200_000]
-OPTIMAL_ITERS = 500_000
-N_SEEDS       = 5
-EVAL_EPISODES = 200
+MAX_ITERS     = [50_000, 100_000, 200_000]
+OPTIMAL_ITERS = 300_000
+N_SEEDS       = 1
+EVAL_EPISODES = 50
 OUT_DIR = os.path.join(os.path.dirname(__file__), "exps_data_extension")
 
 
@@ -119,13 +119,13 @@ def _train(total_steps, seed):
     return primitive_env, SP
 
 
-def _eval(primitive_env, SP, ltl, SM_cls, seed):
-    """Evaluate one SM variant on a task; returns mean discounted return."""
+def _eval(primitive_env, SP, ltl, SM_cls, seed=None):
+    """Evaluate one SM variant on a task; returns success rate in [0, 1]."""
     task_env = Task(gym.make(ENV_NAME), ltl)
     SM = SM_cls(primitive_env, SP, goal_directed=True)
-    total_r, _, _ = evaluate(task_env, SM, epsilon=0, gamma=0.9,
-                             episodes=EVAL_EPISODES, seed=seed)
-    return total_r / EVAL_EPISODES
+    _, success_rate, _ = evaluate(task_env, SM, epsilon=0, gamma=1,
+                                  episodes=EVAL_EPISODES, seed=seed)
+    return success_rate
 
 
 # ─── Main experiment ─────────────────────────────────────────────────────────
@@ -167,7 +167,7 @@ if __name__ == "__main__":
         for fn, ls in [(np.mean, "--"), (np.min, ":"), (np.max, ":")]:
             ax.axhline(fn(opt), color=color, linestyle=ls, linewidth=0.9)
         ax.set_xscale("log")
-        ax.set_xlabel("Training steps"); ax.set_ylabel("Mean return")
+        ax.set_xlabel("Training steps"); ax.set_ylabel("Success rate")
         ax.set_title(task)
 
     three_tasks = ["Coffee", "Patrol", "CoffeeMail"]
