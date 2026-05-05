@@ -389,6 +389,54 @@ class ComposeSkillPrimitive(SkillPrimitive):
         return actions, values
 
 
+def goal_satisfies_exp(exp, goal, predicates):
+    """Return whether a goal vector satisfies a p_*/c_* Boolean expression."""
+    exp = sympify(exp)
+    if isinstance(exp, boolalg.BooleanTrue) or exp is True:
+        return True
+    if isinstance(exp, boolalg.BooleanFalse) or exp is False:
+        return False
+
+    n = len(predicates)
+    subs = {}
+    for sym in exp.free_symbols:
+        name = str(sym)
+        if name.startswith("p_"):
+            subs[sym] = bool(goal[predicates.index(name[2:])])
+        elif name.startswith("c_"):
+            subs[sym] = bool(goal[n + predicates.index(name[2:])])
+    return bool(exp.subs(subs))
+
+
+class GoalSetSkillPrimitive(SkillPrimitive):
+    """Compose a Boolean expression by selecting universal/empty goal slices."""
+
+    def __init__(self, exp, wvfs, goals, predicates):
+        super().__init__(exp, wvfs, goals, predicates)
+
+    def get_action_value(self, states, desired_goal=None, vectorised=False):
+        if desired_goal is None:
+            return super().get_action_value(states, vectorised=vectorised)
+
+        states = states.copy()
+        states["desired_goal"] = np.expand_dims(desired_goal, axis=0)
+        return self.get_action_goal_values(states)
+
+    def get_action_goal_values(self, states):
+        goals = states["desired_goal"]
+        mask = np.array(
+            [goal_satisfies_exp(self.primitive, goal, self.predicates) for goal in goals]
+        )
+        max_actions, max_values = self.wvfs["1"].get_action_value(states)
+        min_actions, min_values = self.wvfs["0"].get_action_value(states)
+        if self.is_discrete:
+            actions = np.where(mask, max_actions, min_actions)
+        else:
+            actions = np.where(mask[:, np.newaxis], max_actions, min_actions)
+        values = np.where(mask, max_values, min_values)
+        return actions, values
+
+
 def value_iteration(delta_u, delta_r, gamma=0.9):
     """
     We use value iteration to compute the Q-function for a reward machine.
@@ -593,6 +641,39 @@ class SkillMachine:
         )
         env_action, self.done_action = self.split_action(action)
         return env_action, value
+
+
+class MinMaxSkillMachine(SkillMachine):
+    """Skill machine variant that composes by goal-set selection.
+
+    This uses the universal WVF ("1") for goals satisfying the current SM Boolean
+    expression, and the empty WVF ("0") otherwise.
+    """
+
+    def step(self, rm, true_propositions):
+        if self.rm_state != rm.u:
+            self.violated_constraints, self.true_propositions = (
+                self.proposition_space.low.copy(),
+                true_propositions.copy(),
+            )
+            self.rm_state, self.exp = rm.u, self.delta_q[rm.u]
+            if self.exp not in self.exp_wvf_cache:
+                self.exp_wvf_cache[self.exp] = GoalSetSkillPrimitive(
+                    self.exp,
+                    self.skill_primitives["1"].wvfs,
+                    self.skill_primitives["1"].goals,
+                    self.skill_primitives["1"].predicates,
+                )
+            self.wvf = self.exp_wvf_cache[self.exp]
+            self.goal = None
+        else:
+            self.violated_constraints |= (
+                self.true_propositions ^ true_propositions
+            ) & self.constraints_mask
+            self.true_propositions = true_propositions.copy()
+            if self.goal_directed:
+                self.goal = self.wvf.goal
+        return self.wvf
 
 
 def evaluate(

@@ -11,10 +11,16 @@ import unittest, numpy as np, gymnasium as gym
 import envs  # registers Office-v0
 from sympy import sympify
 from sympy.logic import boolalg
-from sm import TaskPrimitive, SkillMachine, evaluate
+from sm import (
+    TaskPrimitive,
+    SkillMachine,
+    GoalSetSkillPrimitive,
+    MinMaxSkillMachine,
+    goal_satisfies_exp,
+    evaluate,
+)
 from rm import Task
 import sm_ql
-from exp_convergence import _goal_satisfies_exp, GoalSetSkillPrimitive, GoalSetSkillMachine
 
 
 # ─── Shared fixtures ─────────────────────────────────────────────────────────
@@ -49,46 +55,46 @@ class _MockQL:
 class TestGoalSatisfiesExp(unittest.TestCase):
 
     def test_simple_prop_true(self):
-        self.assertTrue(_goal_satisfies_exp(sympify("p_A"), _make_goal(props=["A"]),
-                                            PREDICATES, CONSTRAINTS))
+        self.assertTrue(goal_satisfies_exp(sympify("p_A"), _make_goal(props=["A"]),
+                                           PREDICATES))
 
     def test_simple_prop_false(self):
-        self.assertFalse(_goal_satisfies_exp(sympify("p_A"), _make_goal(),
-                                             PREDICATES, CONSTRAINTS))
+        self.assertFalse(goal_satisfies_exp(sympify("p_A"), _make_goal(),
+                                            PREDICATES))
 
     def test_negated_constraint_satisfied(self):
         # ~c_d: True when constraint d is NOT violated
-        self.assertTrue(_goal_satisfies_exp(sympify("~c_d"), _make_goal(),
-                                            PREDICATES, CONSTRAINTS))
+        self.assertTrue(goal_satisfies_exp(sympify("~c_d"), _make_goal(),
+                                           PREDICATES))
 
     def test_negated_constraint_violated(self):
-        self.assertFalse(_goal_satisfies_exp(sympify("~c_d"), _make_goal(cons=["d"]),
-                                             PREDICATES, CONSTRAINTS))
+        self.assertFalse(goal_satisfies_exp(sympify("~c_d"), _make_goal(cons=["d"]),
+                                            PREDICATES))
 
     def test_conjunction_both_true(self):
         exp = sympify("p_A & ~c_d")
-        self.assertTrue(_goal_satisfies_exp(exp, _make_goal(props=["A"]),
-                                            PREDICATES, CONSTRAINTS))
+        self.assertTrue(goal_satisfies_exp(exp, _make_goal(props=["A"]),
+                                           PREDICATES))
 
     def test_conjunction_constraint_fails(self):
         exp = sympify("p_A & ~c_d")
-        self.assertFalse(_goal_satisfies_exp(exp, _make_goal(props=["A"], cons=["d"]),
-                                             PREDICATES, CONSTRAINTS))
+        self.assertFalse(goal_satisfies_exp(exp, _make_goal(props=["A"], cons=["d"]),
+                                            PREDICATES))
 
     def test_disjunction(self):
         exp = sympify("p_A | p_B")
-        self.assertTrue(_goal_satisfies_exp(exp, _make_goal(props=["B"]),
-                                            PREDICATES, CONSTRAINTS))
-        self.assertFalse(_goal_satisfies_exp(exp, _make_goal(),
-                                             PREDICATES, CONSTRAINTS))
+        self.assertTrue(goal_satisfies_exp(exp, _make_goal(props=["B"]),
+                                           PREDICATES))
+        self.assertFalse(goal_satisfies_exp(exp, _make_goal(),
+                                            PREDICATES))
 
     def test_boolean_true_literal(self):
-        self.assertTrue(_goal_satisfies_exp(boolalg.BooleanTrue(), _make_goal(),
-                                            PREDICATES, CONSTRAINTS))
+        self.assertTrue(goal_satisfies_exp(boolalg.BooleanTrue(), _make_goal(),
+                                           PREDICATES))
 
     def test_boolean_false_literal(self):
-        self.assertFalse(_goal_satisfies_exp(boolalg.BooleanFalse(), _make_goal(),
-                                             PREDICATES, CONSTRAINTS))
+        self.assertFalse(goal_satisfies_exp(boolalg.BooleanFalse(), _make_goal(),
+                                            PREDICATES))
 
 
 # ─── TestGoalSetSkillPrimitive ───────────────────────────────────────────────
@@ -115,16 +121,14 @@ class TestGoalSetSkillPrimitive(unittest.TestCase):
     def test_satisfying_goal_uses_Q_U(self):
         g  = self._goal(props=["A"])
         SP = {"1": _MockQL(1.0, act=1), "0": _MockQL(0.0, act=0)}
-        gsp = GoalSetSkillPrimitive(SP, {g.tobytes(): g},
-                                    self.preds, self.cons, sympify("p_A"))
+        gsp = GoalSetSkillPrimitive(sympify("p_A"), SP, {g.tobytes(): g}, self.preds)
         _, v = gsp.get_action_value(self._states())
         self.assertAlmostEqual(v[0], 1.0)
 
     def test_non_satisfying_goal_uses_Q_empty(self):
         g  = self._goal()   # A=0 → fails p_A
         SP = {"1": _MockQL(1.0, act=1), "0": _MockQL(0.0, act=0)}
-        gsp = GoalSetSkillPrimitive(SP, {g.tobytes(): g},
-                                    self.preds, self.cons, sympify("p_A"))
+        gsp = GoalSetSkillPrimitive(sympify("p_A"), SP, {g.tobytes(): g}, self.preds)
         _, v = gsp.get_action_value(self._states())
         self.assertAlmostEqual(v[0], 0.0)
 
@@ -133,23 +137,21 @@ class TestGoalSetSkillPrimitive(unittest.TestCase):
         g_good = self._goal(props=["A"])   # A=1 → Q_U,     value 1.0
         goals  = {g_bad.tobytes(): g_bad, g_good.tobytes(): g_good}
         SP     = {"1": _MockQL(1.0, act=1), "0": _MockQL(0.0, act=0)}
-        gsp    = GoalSetSkillPrimitive(SP, goals, self.preds, self.cons, sympify("p_A"))
+        gsp    = GoalSetSkillPrimitive(sympify("p_A"), SP, goals, self.preds)
         _, v   = gsp.get_action_value(self._states())
         self.assertAlmostEqual(v[0], 1.0)   # selects the satisfying goal
 
     def test_desired_goal_routes_to_Q_U(self):
         SP  = {"1": _MockQL(1.0, act=1), "0": _MockQL(0.0, act=0)}
         g   = self._goal(props=["A"])
-        gsp = GoalSetSkillPrimitive(SP, {g.tobytes(): g},
-                                    self.preds, self.cons, sympify("p_A"))
+        gsp = GoalSetSkillPrimitive(sympify("p_A"), SP, {g.tobytes(): g}, self.preds)
         _, v = gsp.get_action_value(self._states(), desired_goal=self._goal(props=["A"]))
         self.assertAlmostEqual(v[0], 1.0)
 
     def test_desired_goal_routes_to_Q_empty(self):
         SP  = {"1": _MockQL(1.0, act=1), "0": _MockQL(0.0, act=0)}
         g   = self._goal()
-        gsp = GoalSetSkillPrimitive(SP, {g.tobytes(): g},
-                                    self.preds, self.cons, sympify("p_A"))
+        gsp = GoalSetSkillPrimitive(sympify("p_A"), SP, {g.tobytes(): g}, self.preds)
         _, v = gsp.get_action_value(self._states(), desired_goal=self._goal())
         self.assertAlmostEqual(v[0], 0.0)
 
@@ -178,7 +180,7 @@ class TestConvergenceParity(unittest.TestCase):
                            "Standard SM should achieve positive return after 50K steps")
 
     def test_gsbta_positive_return(self):
-        self.assertGreater(self._mean_return(GoalSetSkillMachine), 0,
+        self.assertGreater(self._mean_return(MinMaxSkillMachine), 0,
                            "Goal-set BTA should achieve positive return after 50K steps")
 
 
