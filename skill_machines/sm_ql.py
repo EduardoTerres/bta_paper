@@ -1,6 +1,6 @@
 import os, argparse, random, time, torch, numpy as np, gymnasium as gym, envs
 from stable_baselines3.common.logger import configure
-from sm import TaskPrimitive, SkillMachine, BaseAgent, evaluate
+from sm import TaskPrimitive, SkillMachine, MinMaxSkillMachine, BaseAgent, evaluate
 from rm import Task
 
 
@@ -10,7 +10,7 @@ class QLAgent(BaseAgent):
     def __init__(self, name, env, SM=None, save_dir=None, load=False, lr=0.5, gamma=0.9, qinit=0):
         self.values, self.lr, self.gamma, self.SM, self.qinit = {}, lr, gamma, SM, qinit
         self.action_space, self.observation_space = env.action_space, env.observation_space
-        if load: self.values = torch.load(save_dir+"wvf_"+name)
+        if load: self.values = torch.load(os.path.join(save_dir, "wvf_" + name))
         
     def get_action_value(self, state):
         stateb = gym.spaces.flatten(self.observation_space, state).tobytes()
@@ -34,26 +34,49 @@ class QLAgent(BaseAgent):
         else:    self.values[state][action] += self.lr * (reward + self.gamma*self.get_values(state_).max() - self.values[state][action])
 
 
-def learn(primitive_env, task_env, total_steps, zeroshot=False, fewshot=False, q_dir="vf", sp_dir="wvfs", log_dir="logs", load=False, gamma=0.9, lr=0.1, epsilon=0.5, qinit=0, eval_episodes=100, print_freq=10000, seed=None):  
+def resolve_sp_dir(sp_dir, load=False, minmax=False):
+    if not load:
+        return sp_dir
+    if os.path.exists(os.path.join(sp_dir, "wvf_0")):
+        return sp_dir
+    if minmax and sp_dir.rstrip(os.sep).endswith("-minmax"):
+        fallback = sp_dir.rstrip(os.sep)[:-len("-minmax")]
+        if os.path.exists(os.path.join(fallback, "wvf_0")):
+            return fallback + os.sep
+    raise FileNotFoundError(
+        "Missing pretrained primitive WVFs in '{}'. Train them first or pass "
+        "--sp_dir pointing at a directory containing wvf_0, wvf_1, and goals.".format(sp_dir)
+    )
+
+
+def learn(primitive_env, task_env, total_steps, zeroshot=False, fewshot=False, q_dir="vf", sp_dir="wvfs", log_dir="logs", load=False, gamma=0.9, lr=0.1, epsilon=0.5, qinit=0, eval_episodes=100, print_freq=10000, seed=None, minmax=False, checkpoint_metric="return"):
     """Q-Learning based method for solving temporal logic tasks zeroshot or fewshot using Skill Machines"""
 
     # Initialise the World Value Functions for the min ("0") and max ("1") WVFs
+    sp_dir = resolve_sp_dir(sp_dir, load=load, minmax=minmax)
     SP = {primitive: QLAgent(primitive, primitive_env, save_dir=sp_dir, load=load, lr=lr, gamma=gamma, qinit=qinit) for primitive in ['0','1']}
-    if load: primitive_env.goals.update(torch.load(sp_dir+"goals")) 
+    if load: primitive_env.goals.update(torch.load(os.path.join(sp_dir, "goals")))
     # Skill machine over the learned skill primitives. goal_directed=True gives faster runtime since goals are maximised only per rm transition (and not per step)
-    SM = SkillMachine(primitive_env, SP, goal_directed=True) 
+    sm_cls = MinMaxSkillMachine if minmax else SkillMachine
+    SM = sm_cls(primitive_env, SP, goal_directed=True)
     # Initialise task specific value function for fewshot learning
     if fewshot: Q = QLAgent("skill", task_env, SM=SM, lr=lr, gamma=gamma, qinit=qinit)
 
     # Start Training
     logger = configure(log_dir, ["stdout", "csv", "tensorboard"])
-    step, reward_total, successes, best_total_reward, num_episodes, start_time = 0, 0, 0, 0, 1, time.time()
+    checkpoint_metrics = ("return", "success") if checkpoint_metric == "both" else (checkpoint_metric,)
+    invalid_metrics = set(checkpoint_metrics) - {"return", "success"}
+    if invalid_metrics:
+        raise ValueError("checkpoint_metric must be 'return', 'success', or 'both'")
+    best_scores = {metric: float("-inf") for metric in checkpoint_metrics}
+    step, reward_total, successes, num_episodes, start_time = 0, 0, 0, 1, time.time()
     while step < total_steps:
+        episode_seed = None if seed is None else seed + num_episodes - 1
         if fewshot or zeroshot:
-            state, info = task_env.reset(seed=seed)   
+            state, info = task_env.reset(seed=episode_seed)   
             SM.reset(task_env.rm, info["true_propositions"])
         else:
-            state, info = primitive_env.reset(seed=seed) 
+            state, info = primitive_env.reset(seed=episode_seed) 
         
         while True:            
             # Selecting and executing the action
@@ -87,13 +110,17 @@ def learn(primitive_env, task_env, total_steps, zeroshot=False, fewshot=False, q
                 if task_env: 
                     if fewshot: eval_total_reward, eval_successes, _ = evaluate(task_env, SM=SM, skill=Q, epsilon=0, gamma=gamma, episodes=eval_episodes, seed=seed)
                     else:       eval_total_reward, eval_successes, _ = evaluate(task_env, SM=SM, epsilon=0, gamma=gamma, episodes=eval_episodes, seed=seed)
-                    if eval_total_reward >= best_total_reward:
-                        best_total_reward = eval_total_reward
-                        if fewshot:
-                            torch.save(Q, q_dir+"skill")
-                        elif not zeroshot:
-                            for primitive in SP: torch.save(SP[primitive].values, sp_dir+"wvf_"+primitive)
-                            torch.save(primitive_env.goals, sp_dir+"goals")
+                    checkpoint_scores = {"return": eval_total_reward, "success": eval_successes}
+                    for metric in checkpoint_metrics:
+                        if checkpoint_scores[metric] >= best_scores[metric]:
+                            best_scores[metric] = checkpoint_scores[metric]
+                            metric_sp_dir = sp_dir if checkpoint_metric != "both" else os.path.join(sp_dir, metric)
+                            if fewshot:
+                                torch.save(Q, q_dir+"skill")
+                            elif not zeroshot:
+                                os.makedirs(metric_sp_dir, exist_ok=True)
+                                for primitive in SP: torch.save(SP[primitive].values, os.path.join(metric_sp_dir, "wvf_"+primitive))
+                                torch.save(primitive_env.goals, os.path.join(metric_sp_dir, "goals"))
                     logger.record("eval total reward", eval_total_reward); logger.record("eval successes", eval_successes)
                 logger.record("steps", step); logger.record("episodes", num_episodes); logger.record("goals", len(primitive_env.goals))
                 logger.record("total reward", reward_total); logger.record("successes", successes/num_episodes)
@@ -112,6 +139,8 @@ parser.add_argument("--total_steps", help="Total training steps", type=int, defa
 parser.add_argument("--load", help="Load pretrained skill primitives", action='store_true', default=False)
 parser.add_argument("--zeroshot", help="Zeroshot transfer", action='store_true', default=False)
 parser.add_argument("--fewshot", help="Fewshot transfer", action='store_true', default=False)
+parser.add_argument("--minmax", help="Use goal-set minmax composition instead of Boolean WVF composition", action='store_true', default=False)
+parser.add_argument("--checkpoint_metric", choices=("return", "success", "both"), default="return", help="Metric used to keep the best checkpoint during training")
 parser.add_argument("--sp_dir", help="Directory where the learned skill primitives will be saved", default='')
 parser.add_argument("--q_dir", help="Directory where the learned task specific skill will be saved", default='')
 parser.add_argument("--log_dir", help="Directory where the results will be saved", default='')
@@ -136,4 +165,4 @@ if __name__ == "__main__":
         task_env = Task(gym.make(args.env), args.ltl) if args.ltl else None
 
     # Train primitive skill (skill_primitive), and optionally task specific skill fewshot
-    skill_primitive = learn(primitive_env, task_env, args.total_steps, args.zeroshot, args.fewshot, q_dir, sp_dir, log_dir, args.load, qinit=args.qinit, seed=args.seed)
+    skill_primitive = learn(primitive_env, task_env, args.total_steps, args.zeroshot, args.fewshot, q_dir, sp_dir, log_dir, args.load, qinit=args.qinit, seed=args.seed, minmax=args.minmax, checkpoint_metric=args.checkpoint_metric)

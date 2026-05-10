@@ -12,3 +12,6 @@ skill_machines/__pycache__/
 skill_machines/*__pycache__/
 skill_machines/MUJOCO_LOG.TXT
 skill_machines/*MUJOCO_LOG.TXT
+skill_machines/extension/exps_data_extension/*
+
+*.out

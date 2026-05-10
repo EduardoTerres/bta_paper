@@ -38,8 +38,9 @@ def learn(task_env, total_steps, q_dir="vf", log_dir="logs", gamma=0.9, lr=0.1, 
     # Start Training
     logger = configure(log_dir, ["stdout", "csv", "tensorboard"])
     step, reward_total, successes, best_total_reward, num_episodes, start_time = 0, 0, 0, 0, 1, time.time()
-    while step < total_steps:
-        state, info = task_env.reset(seed=seed)       
+    while step < total_steps:        
+        episode_seed = None if seed is None else seed + num_episodes - 1
+        state, info = task_env.reset(seed=episode_seed)       
         while True:            
             # Selecting and executing the action
             if random.random() < epsilon: action = task_env.action_space.sample()

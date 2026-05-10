@@ -415,12 +415,47 @@ class GoalSetSkillPrimitive(SkillPrimitive):
         super().__init__(exp, wvfs, goals, predicates)
 
     def get_action_value(self, states, desired_goal=None, vectorised=False):
-        if desired_goal is None:
-            return super().get_action_value(states, vectorised=vectorised)
-
         states = states.copy()
-        states["desired_goal"] = np.expand_dims(desired_goal, axis=0)
-        return self.get_action_goal_values(states)
+        if desired_goal is not None:
+            states["desired_goal"] = np.expand_dims(desired_goal, axis=0)
+            return self.get_action_goal_values(states)
+
+        goals = np.array(list(self.goals.values()))
+        satisfies = np.array(
+            [goal_satisfies_exp(self.primitive, goal, self.predicates) for goal in goals]
+        )
+        candidate_goals = goals[satisfies] if satisfies.any() else goals
+        wvf = self.wvfs["1"] if satisfies.any() else self.wvfs["0"]
+
+        if not vectorised:
+            actions, values = [], []
+            for goal in candidate_goals:
+                states["desired_goal"] = np.expand_dims(goal, axis=0)
+                action, value = wvf.get_action_value(states)
+                actions.append(action[0])
+                values.append(value[0])
+            goal_idx = np.argmax(values)
+            self.goal = candidate_goals[goal_idx]
+            if self.is_discrete:
+                return [actions[goal_idx]], [values[goal_idx]]
+            return actions[goal_idx], values[goal_idx]
+
+        shape = states["env_state"].shape
+        n_goals = len(candidate_goals)
+        states["desired_goal"] = np.concatenate([candidate_goals] * shape[0], axis=0)
+        for key in states.keys():
+            if key != "desired_goal":
+                states[key] = np.repeat(states[key], repeats=n_goals, axis=0)
+        actions, values = wvf.get_action_value(states)
+        mask = [
+            np.argmax(values[s * n_goals : (s + 1) * n_goals]) + s * n_goals
+            for s in range(shape[0])
+        ]
+        if shape[0] == 1:
+            self.goal = states["desired_goal"][mask, :][0]
+        if self.is_discrete:
+            return actions[mask], values[mask]
+        return actions[mask, :], values[mask]
 
     def get_action_goal_values(self, states):
         goals = states["desired_goal"]
@@ -692,7 +727,8 @@ def evaluate(
     while episode < episodes:
         episode += 1
         step = 0
-        state, info = task_env.reset(seed=seed)
+        episode_seed = None if seed is None else seed + episode - 1
+        state, info = task_env.reset(seed=episode_seed)
         if SM:
             SM.reset(task_env.rm, info["true_propositions"])
         while True:
