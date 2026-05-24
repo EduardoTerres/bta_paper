@@ -1,0 +1,78 @@
+Metadata-Version: 2.4
+Name: rl
+Version: 0.1.0
+Summary: Boolean composition experiments with reinforcement learning
+Project-URL: Homepage, https://github.com/yourusername/boolean_composition
+Project-URL: Repository, https://github.com/yourusername/boolean_composition.git
+Project-URL: Issues, https://github.com/yourusername/boolean_composition/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.11
+Requires-Python: <3.12,>=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: boolean.py
+Requires-Dist: certifi
+Requires-Dist: cloudpickle
+Requires-Dist: cycler
+Requires-Dist: decorator
+Requires-Dist: deepdish>=0.3.7
+Requires-Dist: funcsigs
+Requires-Dist: future
+Requires-Dist: gym==0.25.2
+Requires-Dist: imageio
+Requires-Dist: Keras-Applications
+Requires-Dist: Keras-Preprocessing
+Requires-Dist: kiwisolver
+Requires-Dist: matplotlib
+Requires-Dist: mock
+Requires-Dist: numexpr
+Requires-Dist: numpy<2.0.0
+Requires-Dist: olefile
+Requires-Dist: opencv-python>=4.11.0.86
+Requires-Dist: pandas
+Requires-Dist: pbr
+Requires-Dist: Pillow
+Requires-Dist: pygame
+Requires-Dist: pyglet
+Requires-Dist: pyparsing
+Requires-Dist: python-dateutil
+Requires-Dist: pytz
+Requires-Dist: scipy
+Requires-Dist: seaborn
+Requires-Dist: shutilwhich
+Requires-Dist: six
+Requires-Dist: tables
+Requires-Dist: tempdir
+Requires-Dist: torch
+Requires-Dist: torchvision
+Requires-Dist: tornado
+Requires-Dist: tqdm>=4.67.1
+Requires-Dist: wandb>=0.27.0
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: black; extra == "dev"
+Requires-Dist: flake8; extra == "dev"
+Requires-Dist: mypy; extra == "dev"
+
+Code for a extension providing further insights in the paper "A Boolean Task Algebra For Reinforcement Learning"
+
+## Training tasks
+Run
+`
+uv run four_rooms/extension/exp_train.py
+`
+specifying the number of rooms you want to run the experiment for
+(e.g. `NUM_ROOMS = 8`).
+
+## Training tasks by increasing level of optimality
+Run
+`
+uv run four_rooms/extension/exp_convergence.py
+`
+
+## Plots (all)
+
+Run
+`
+uv run four_rooms/extension/plots.py
+`

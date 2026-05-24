@@ -19,6 +19,7 @@ python skill_machines/extension/exp_convergence.py \
   --eval_only \
   --tasks coffee,patrol,coffee_mail,long \
   --checkpoint_env Office-CoffeeMail-Task-v0 \
-  --maxiters 100000,200000,400000,600000,800000,1000000 \
+  --maxiters 1000,10000,50000,100000,200000,500000,800000,1000000 \
   --optimal_reference max_observed \
+  --rmin "-1" \
   --num_runs 500

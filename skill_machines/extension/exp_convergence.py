@@ -39,6 +39,7 @@ PRIMITIVE_ENV_ID = "Office-v0"
 METHODS = ("boolean", "minmax")
 COLORS = {"boolean": "steelblue", "minmax": "tomato"}
 DEFAULT_OUTPUT = os.path.join(SCRIPT_DIR, "exps_data_extension", "sm_convergence.pkl")
+RMIN_ENV_VARS = ("RMIN", "SM_RMIN")
 
 
 def parse_maxiters(raw):
@@ -64,8 +65,72 @@ def apply_debug_defaults(args):
     return args
 
 
-def make_primitive_env(env_id=PRIMITIVE_ENV_ID):
-    return TaskPrimitive(gym.make(env_id))
+def value_slug(value):
+    return str(value).replace("-", "neg").replace(".", "p")
+
+
+def env_float(names):
+    for name in names:
+        raw = os.environ.get(name)
+        if raw not in (None, ""):
+            return float(raw), name
+    return None, None
+
+
+def resolve_rmin(args):
+    if args.rmin is not None:
+        args.rmin_source = "--rmin"
+        return args
+
+    rmin, source = env_float(RMIN_ENV_VARS)
+    if rmin is None:
+        args.rmin = 0.0
+        args.rmin_source = "default"
+    else:
+        args.rmin = rmin
+        args.rmin_source = f"${source}"
+    return args
+
+
+def configure_output_paths(args):
+    run_id = args.run_id
+    using_default_output = args.output == DEFAULT_OUTPUT
+    if run_id is None and args.rmin_source != "default":
+        run_id = f"rmin_{value_slug(args.rmin)}"
+    args.run_id = run_id
+
+    if run_id:
+        args.sp_dir = os.path.join(args.sp_dir, run_id)
+        args.log_dir = os.path.join(args.log_dir, run_id)
+        if using_default_output:
+            args.output = os.path.join(
+                SCRIPT_DIR,
+                "exps_data_extension",
+                run_id,
+                "sm_convergence.pkl",
+            )
+    return args
+
+
+def ensure_no_existing_file(path, args, description):
+    if os.path.exists(path) and not args.overwrite:
+        raise FileExistsError(
+            f"{description} already exists: {path}\n"
+            "Choose a different --output/--run_id or pass --overwrite."
+        )
+
+
+def ensure_writable_run_dir(path, args, description):
+    if os.path.isdir(path) and os.listdir(path) and not args.overwrite:
+        raise FileExistsError(
+            f"{description} already has files: {path}\n"
+            "Choose a different --run_id/--sp_dir/--log_dir or pass --overwrite."
+        )
+    os.makedirs(path, exist_ok=True)
+
+
+def make_primitive_env(args, env_id=PRIMITIVE_ENV_ID):
+    return TaskPrimitive(gym.make(env_id), rmin=args.rmin)
 
 
 def save_primitives(primitive_env, SP, sp_dir, args):
@@ -132,7 +197,7 @@ def require_checkpoint(sp_dir, args):
 
 
 def init_primitives_once(total_steps, args, label="boolean"):
-    primitive_env = make_primitive_env(args.primitive_env)
+    primitive_env = make_primitive_env(args, args.primitive_env)
     sp_dir = primitive_run_dir(total_steps, args, label, env_id=checkpoint_env(args))
     require_checkpoint(sp_dir, args)
     SP = {
@@ -149,12 +214,12 @@ def init_primitives_once(total_steps, args, label="boolean"):
 
 
 def train_primitives_once(total_steps, args, label="boolean"):
-    primitive_env = make_primitive_env(args.primitive_env)
+    primitive_env = make_primitive_env(args, args.primitive_env)
     run_name = primitive_run_name(total_steps, args.primitive_env, label)
     log_dir = os.path.join(args.log_dir, run_name) + "/"
     sp_dir = primitive_run_dir(total_steps, args, label)
-    os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(sp_dir, exist_ok=True)
+    ensure_writable_run_dir(log_dir, args, "Primitive log directory")
+    ensure_writable_run_dir(sp_dir, args, "Primitive checkpoint directory")
 
     print(f"\n[train] {run_name}")
     SP = learn(
@@ -393,6 +458,12 @@ def plot_results(results, output):
 
 def run(args):
     args = apply_debug_defaults(args)
+    args = resolve_rmin(args)
+    args = configure_output_paths(args)
+    ensure_no_existing_file(args.output, args, "Results output")
+    print(f"Using rmin={args.rmin:g} ({args.rmin_source})")
+    if args.run_id:
+        print(f"Using run_id={args.run_id}")
     random.seed(args.seed)
     np.random.seed(args.seed)
     gym.logger.set_level(gym.logger.ERROR)
@@ -410,7 +481,7 @@ def run(args):
         results["optimal"] = {}
         optimal_primitive_env, optimal_SP, optimal_sp_dir = get_primitives(args.optimal_iters, args, label="optimal")
         for task_name, env_id in tqdm(task_items, desc="Optimal references"):
-            optimal_task_env = gym.make(env_id)
+            optimal_task_env = gym.make(env_id, rmin=args.rmin)
             results["optimal"][task_name] = {}
             for method in METHODS:
                 restore_best_primitives(
@@ -464,7 +535,7 @@ def run(args):
         primitive_env, SP, sp_dir = get_primitives(total_steps, args)
         for task_name, env_id in tqdm(task_items, desc=f"Tasks @ {total_steps}", leave=False):
             results[total_steps][task_name] = {}
-            task_env = gym.make(env_id)
+            task_env = gym.make(env_id, rmin=args.rmin)
             for method in METHODS:
                 restore_best_primitives(
                     primitive_env,
@@ -542,6 +613,9 @@ def build_parser():
     parser.add_argument("--primitive_env", default=PRIMITIVE_ENV_ID, help="Base environment used to train shared primitive WVFs")
     parser.add_argument("--checkpoint_env", default=None, help="Checkpoint path environment prefix used by --eval_only; defaults to --primitive_env")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
+    parser.add_argument("--rmin", type=float, default=None)
+    parser.add_argument("--run_id", default=None)
+    parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--gamma", type=float, default=0.9)
     parser.add_argument("--eval_gamma", type=float, default=0.9)

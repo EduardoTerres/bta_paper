@@ -14,4 +14,10 @@ skill_machines/MUJOCO_LOG.TXT
 skill_machines/*MUJOCO_LOG.TXT
 skill_machines/extension/exps_data_extension/*
 
+**/wandb/*
 *.out
+*.log
+*.json
+*.pdf
+*.dqn
+*.h5
