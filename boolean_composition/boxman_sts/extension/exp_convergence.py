@@ -1,16 +1,18 @@
 import argparse
+import faulthandler
+import os
 import random
 from pathlib import Path
 import sys
 
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+faulthandler.enable(all_threads=True)
+
 import deepdish as dd
-import matplotlib
 import numpy as np
 import torch
 from tqdm import tqdm
-
-matplotlib.use("Agg")
-from matplotlib import pyplot as plt
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = ROOT.parent
@@ -19,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 from dqn import Agent, ComposedDQN, ComposedDQN_onoff, FloatTensor
 from gym_repoman.envs import CollectEnv
+from plot_utils import by_task_figure_path, plot_convergence, plot_convergence_by_task
 from trainer import load, save
 from wrappers import MaxLength, WarpFrame
 
@@ -121,28 +124,6 @@ def existing_run_indices():
     return sorted(run_indices)
 
 
-def next_run_index():
-    run_indices = existing_run_indices()
-    if not run_indices:
-        return 0
-    return run_indices[-1] + 1
-
-
-def reserve_run_indices(num_runs):
-    FULL_RUNS_DIR.mkdir(parents=True, exist_ok=True)
-    reserved = []
-    run_idx = next_run_index()
-    while len(reserved) < num_runs:
-        try:
-            run_dir(run_idx).mkdir()
-        except FileExistsError:
-            run_idx += 1
-            continue
-        reserved.append(run_idx)
-        run_idx += 1
-    return reserved
-
-
 def is_complete_run(run_idx, checkpoint_steps):
     return all(
         checkpoint_path(run_idx, step, task_name).exists()
@@ -159,9 +140,27 @@ def completed_run_indices(checkpoint_steps):
     ]
 
 
+def close_env(env):
+    try:
+        env.close()
+    except Exception:
+        pass
+    try:
+        import pygame
+
+        pygame.display.quit()
+    except Exception:
+        pass
+
+
 def load_checkpoint(run_idx, step, task_name, condition):
     model_path = checkpoint_path(run_idx, step, task_name)
-    dqn = load(str(model_path), make_env(condition), map_location="cpu")
+    env = make_env(condition)
+    try:
+        dqn = load(str(model_path), env, map_location="cpu")
+    finally:
+        close_env(env)
+    dqn.eval()
     if torch.cuda.is_available():
         dqn.cuda()
     return dqn
@@ -245,21 +244,19 @@ def boolean_composition(dqn_blue, dqn_square, task_name):
     raise ValueError(f"Unknown task: {task_name}")
 
 
-def evaluate(dqn, condition, goals, max_trajectory):
-    env = make_env(condition, max_trajectory=max_trajectory)
+def evaluate(dqn, env, goal_tensor, max_trajectory):
     total_return = 0
-    with torch.no_grad():
+    with torch.inference_mode():
         obs = env.reset()
         for _ in range(max_trajectory):
-            obs_tensor = torch.from_numpy(obs).type(FloatTensor).unsqueeze(0)
-            values = []
-            for goal in goals:
-                goal_tensor = (
-                    torch.from_numpy(np.array(goal)).type(FloatTensor).unsqueeze(0)
-                )
-                values.append(dqn(torch.cat((obs_tensor, goal_tensor), dim=3)).squeeze(0))
-            values = torch.stack(values, 1).t()
-            action = values.data.max(0)[0].max(0)[1].item()
+            obs_tensor = (
+                torch.from_numpy(obs)
+                .type(FloatTensor)
+                .unsqueeze(0)
+                .expand(goal_tensor.shape[0], -1, -1, -1)
+            )
+            values = dqn(torch.cat((obs_tensor, goal_tensor), dim=3))
+            action = values.max(0)[0].argmax().item()
             obs, reward, done, _ = env.step(action)
             total_return += reward
             if done:
@@ -267,53 +264,80 @@ def evaluate(dqn, condition, goals, max_trajectory):
     return total_return
 
 
-def evaluate_single_run(run_idx, checkpoint_steps, goals, max_trajectory):
+def evaluate_single_run(
+    run_idx,
+    checkpoint_steps,
+    goals,
+    max_trajectory,
+    num_eval_episodes,
+):
     returns_per_steps = {}
-    for step in tqdm(checkpoint_steps, desc=f"Evaluating run_{run_idx:03d}", leave=False):
+    goal_tensor = torch.from_numpy(np.asarray(goals)).type(FloatTensor)
+    for step in tqdm(
+        checkpoint_steps,
+        desc=f"Checkpoint steps for run_{run_idx:03d}",
+        leave=False,
+    ):
         dqns = {
             name: load_checkpoint(run_idx, step, name, condition)
             for name, condition in TRAIN_TASKS.items()
         }
         returns = {}
+        eval_progress = tqdm(
+            total=len(TASKS) * 2 * num_eval_episodes,
+            desc=f"Eval episodes at {step} steps",
+            leave=False,
+        )
         for task_name, task in TASKS.items():
             on_goals = [goals[i] for i in task["goal_indices"]]
-            dqn_onoff = ComposedDQN_onoff(dqns["on"], dqns["off"], on_goals=on_goals)
-            dqn_boolean = boolean_composition(dqns["blue"], dqns["square"], task_name)
-            returns[task_name] = {
-                "onoff": [
-                    evaluate(dqn_onoff, task["condition"], goals, max_trajectory)
-                ],
-                "boolean": [
-                    evaluate(dqn_boolean, task["condition"], goals, max_trajectory)
-                ],
+            env = make_env(task["condition"], max_trajectory=max_trajectory)
+            methods = {
+                "onoff": ComposedDQN_onoff(dqns["on"], dqns["off"], on_goals=on_goals),
+                "boolean": boolean_composition(dqns["blue"], dqns["square"], task_name),
             }
+            returns[task_name] = {"onoff": [], "boolean": []}
+            try:
+                for method_name, dqn in methods.items():
+                    for _ in range(num_eval_episodes):
+                        returns[task_name][method_name].append(
+                            evaluate(dqn, env, goal_tensor, max_trajectory)
+                        )
+                        eval_progress.update(1)
+            finally:
+                close_env(env)
+        eval_progress.close()
         returns_per_steps[step] = returns
+        save_returns(run_returns_path(run_idx), returns_per_steps)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     return returns_per_steps
 
 
-def load_or_evaluate_single_run(run_idx, checkpoint_steps, goals, max_trajectory):
-    returns_path = run_returns_path(run_idx)
-    if returns_path.exists():
-        returns = dd.io.load(str(returns_path))
-        if has_requested_returns(returns, checkpoint_steps):
-            return returns
-
-    returns = evaluate_single_run(run_idx, checkpoint_steps, goals, max_trajectory)
-    save_returns(returns_path, returns)
+def load_or_evaluate_single_run(
+    run_idx,
+    checkpoint_steps,
+    goals,
+    max_trajectory,
+    num_eval_episodes,
+):
+    returns = evaluate_single_run(
+        run_idx,
+        checkpoint_steps,
+        goals,
+        max_trajectory,
+        num_eval_episodes,
+    )
+    save_returns(run_returns_path(run_idx), returns)
     return returns
 
 
-def has_requested_returns(returns, checkpoint_steps):
-    return all(
-        step in returns
-        and task_name in returns[step]
-        and all(method in returns[step][task_name] for method in ["onoff", "boolean"])
-        for step in checkpoint_steps
-        for task_name in TASKS
-    )
-
-
-def aggregate_returns(run_indices, checkpoint_steps, goals, max_trajectory):
+def aggregate_returns(
+    run_indices,
+    checkpoint_steps,
+    goals,
+    max_trajectory,
+    num_eval_episodes,
+):
     returns_per_steps = {
         step: {
             task_name: {"onoff": [], "boolean": []}
@@ -322,12 +346,13 @@ def aggregate_returns(run_indices, checkpoint_steps, goals, max_trajectory):
         for step in checkpoint_steps
     }
 
-    for run_idx in tqdm(run_indices, desc="Loading run returns"):
+    for run_idx in tqdm(run_indices, desc="Evaluation runs"):
         run_returns = load_or_evaluate_single_run(
             run_idx,
             checkpoint_steps,
             goals,
             max_trajectory,
+            num_eval_episodes,
         )
         for step in checkpoint_steps:
             for task_name in TASKS:
@@ -340,7 +365,19 @@ def aggregate_returns(run_indices, checkpoint_steps, goals, max_trajectory):
 
 
 def run(args):
-    wandb_run = init_wandb(args)
+    if args.debug:
+        args.max_timesteps = [5_000]
+        args.max_trajectory = min(args.max_trajectory, 5)
+        args.wandb = False
+
+    if args.make_plots:
+        returns_per_steps = dd.io.load(str(args.output))
+        plot_convergence(returns_per_steps, args.figure)
+        task_figure = by_task_figure_path(args.figure)
+        plot_convergence_by_task(returns_per_steps, task_figure)
+        print(f"Saved plots: {args.figure}, {task_figure}")
+        return
+
     checkpoint_steps = sorted(set(args.max_timesteps))
     goals = dd.io.load(str(ROOT / "goals.h5"))
     if args.require_cuda and not torch.cuda.is_available():
@@ -349,65 +386,68 @@ def run(args):
     print(f"Training device: {device}")
 
     if not args.eval_only:
-        train_run_indices = reserve_run_indices(args.num_runs)  # for parallel training
-        print("Reserved runs:", ", ".join(f"run_{idx:03d}" for idx in train_run_indices))
-        for run_idx in tqdm(train_run_indices, desc="Full training runs"):
-            for task_idx, (name, condition) in enumerate(TRAIN_TASKS.items()):
-                train_or_load_full_run(
-                    run_idx,
-                    name,
-                    task_idx,
-                    condition,
-                    checkpoint_steps,
-                    args.seed,
-                    args.eps_timesteps,
-                    make_train_log_callback(
-                        wandb_run,
-                        name,
-                        run_idx,
-                        max(checkpoint_steps),
-                    ),
-                )
-        for run_idx in train_run_indices:
-            run_returns = evaluate_single_run(
-                run_idx,
-                checkpoint_steps,
-                goals,
-                args.max_trajectory,
+        if args.run is None or args.train_task is None:
+            raise ValueError("Training requires --run and --train-task.")
+
+        for task_name in args.train_task:
+            wandb_run = init_wandb(
+                args,
+                default_name=default_wandb_name(args, task_name),
             )
-            save_returns(run_returns_path(run_idx), run_returns)
-        if wandb_run:
-            wandb_run.finish()
+            task_idx = list(TRAIN_TASKS).index(task_name)
+            train_or_load_full_run(
+                args.run,
+                task_name,
+                task_idx,
+                TRAIN_TASKS[task_name],
+                checkpoint_steps,
+                args.seed,
+                args.eps_timesteps,
+                make_train_log_callback(
+                    wandb_run,
+                    task_name,
+                    args.run,
+                    max(checkpoint_steps),
+                ),
+            )
+            print(f"Finished run_{args.run:03d}/{task_name}")
+            if wandb_run:
+                wandb_run.finish()
         return
 
+    wandb_run = init_wandb(args, default_name=default_wandb_name(args))
     eval_run_indices = completed_run_indices(checkpoint_steps)
     if not eval_run_indices:
         raise RuntimeError("No complete convergence runs found to evaluate.")
+    print("Evaluating runs:", ", ".join(f"run_{idx:03d}" for idx in eval_run_indices))
 
     returns_per_steps = aggregate_returns(
         eval_run_indices,
         checkpoint_steps,
         goals,
         args.max_trajectory,
+        args.num_eval_episodes,
     )
     for step in checkpoint_steps:
-        for task_name in TASKS:
-            log_evaluation_returns(
-                wandb_run,
-                step,
-                task_name,
-                returns_per_steps[step][task_name],
-            )
+        log_evaluation_returns(wandb_run, step, returns_per_steps[step])
 
     save_returns(args.output, returns_per_steps)
-    plot_convergence(returns_per_steps, args.figure)
     if wandb_run:
         wandb_run.save(str(args.output))
-        wandb_run.save(str(args.figure))
         wandb_run.finish()
 
 
-def init_wandb(args):
+def default_wandb_name(args, task_name=None):
+    if args.eval_only:
+        return "eval"
+    task_part = task_name or "-".join(args.train_task)
+    base = f"run_{args.run:03d}-{task_part}"
+    if args.wandb_name:
+        return f"{args.wandb_name}-{task_part}"
+    return base
+
+
+def init_wandb(args, default_name=None):
     if not args.wandb:
         return None
 
@@ -415,10 +455,11 @@ def init_wandb(args):
 
     run = wandb.init(
         project=args.wandb_project,
-        name=args.wandb_name,
+        name=default_name or args.wandb_name,
         config=vars(args),
     )
     wandb.define_metric("train/*", step_metric="train/step")
+    wandb.define_metric("eval/training_timesteps")
     wandb.define_metric("eval/*", step_metric="eval/training_timesteps")
     return run
 
@@ -434,59 +475,33 @@ def make_train_log_callback(wandb_run, task_name, run_idx, max_timesteps):
             f"{metric_prefix}/{metric_name}": value
             for metric_name, value in metrics.items()
         }
-        wandb_run.log({
-            "train/step": step,
-            "train/full_run": run_idx,
-            "train/max_timesteps": max_timesteps,
-            "train/task": task_name,
-            **prefixed_metrics,
-        })
+        wandb_run.log(
+            {
+                "train/step": step,
+                "train/full_run": run_idx,
+                "train/max_timesteps": max_timesteps,
+                "train/task": task_name,
+                **prefixed_metrics,
+            },
+            step=step,
+        )
 
     return log_training_step
 
 
-def log_evaluation_returns(wandb_run, max_timesteps, task_name, task_returns):
+def log_evaluation_returns(wandb_run, max_timesteps, step_returns):
     if not wandb_run:
         return
 
     log_data = {
         "eval/training_timesteps": max_timesteps,
-        "eval/task": task_name,
     }
-    for method, values in task_returns.items():
-        prefix = f"eval/{task_name}/{method}"
-        log_data[f"{prefix}/mean_return"] = float(np.mean(values))
-        log_data[f"{prefix}/stderr_return"] = float(
-            np.std(values) / np.sqrt(max(1, len(values)))
-        )
-    wandb_run.log(log_data)
-
-
-def plot_convergence(returns_per_steps, figure_path):
-    steps = sorted(returns_per_steps)
-    methods = ["onoff", "boolean"]
-    fig, ax = plt.subplots(figsize=(7, 4))
-    for method in methods:
-        means = []
-        stds = []
-        for step in steps:
-            values = []
-            for task_returns in returns_per_steps[step].values():
-                values.extend(task_returns[method])
-            means.append(np.mean(values))
-            stds.append(np.std(values))
-        means = np.array(means)
-        stds = np.array(stds)
-        ax.plot(steps, means, marker="o", label=method)
-        ax.fill_between(steps, means - stds, means + stds, alpha=0.2)
-    ax.set_xscale("log")
-    ax.set_xlabel("DQN training timesteps")
-    ax.set_ylabel("Average return")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    figure_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(figure_path), bbox_inches="tight")
-    plt.close(fig)
+    for task_name, task_returns in step_returns.items():
+        for method, values in task_returns.items():
+            prefix = f"eval/{task_name}/{method}"
+            log_data[f"{prefix}/mean_return"] = float(np.mean(values))
+            log_data[f"{prefix}/std_return"] = float(np.std(values))
+    wandb_run.log(log_data, step=max_timesteps)
 
 
 def parse_args():
@@ -498,20 +513,28 @@ def parse_args():
         default=[10_000, 25_000, 50_000, 100_000],
         help="Checkpoint/evaluation grid. Each training run goes to the largest value.",
     )
+    parser.add_argument("--run", type=int, default=None)
     parser.add_argument(
-        "--num-runs",
-        type=int,
-        default=5,
-        help="Number of full training replicates to average over.",
+        "--train-task",
+        nargs="+",
+        choices=list(TRAIN_TASKS),
+        default=None,
     )
     parser.add_argument("--max-trajectory", type=int, default=20)
+    parser.add_argument("--num-eval-episodes", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--eps-timesteps", type=int, default=100_000)
     parser.add_argument("--require-cuda", action="store_true")
+    parser.add_argument("--debug", action="store_true")
     parser.add_argument(
         "--eval-only",
         action="store_true",
         help="Skip training and average all complete saved runs for the requested grid.",
+    )
+    parser.add_argument(
+        "--make-plots",
+        action="store_true",
+        help="Load --output and write plots without training or evaluation.",
     )
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb-project", default="boxman-sts-convergence")

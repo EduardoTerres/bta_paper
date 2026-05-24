@@ -13,14 +13,14 @@ cd /home/eterrescaballe/bta_paper/boolean_composition
 
 args=(
     --max-timesteps 10000 20000 30000 40000 50000 60000 70000 80000 90000 100000 120000 140000 160000 180000 200000 250000 300000 350000 400000 450000 500000 550000 600000 650000 700000 750000 800000
-    --num-runs 1
     --max-trajectory 20
-    --eps-timesteps 100000
-    --require-cuda
     --output boxman_sts/data/convergence_returns.h5
     --figure boxman_sts/plots/convergence_returns.png
+    --eval-only
+    --make-plots
     --wandb
-    # --eval-only
+    --require-cuda
+    # --debug
 )
 
 uv run python boxman_sts/extension/exp_convergence.py "${args[@]}"
