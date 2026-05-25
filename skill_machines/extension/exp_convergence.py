@@ -1,5 +1,6 @@
 import argparse
 import copy
+import math
 import os
 import pickle
 import random
@@ -11,7 +12,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 import torch
+from matplotlib import rc
 from tqdm import tqdm
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,9 +27,8 @@ from sm import TaskPrimitive
 from sm_ql import QLAgent, learn
 
 PLOT_RC = {
-    "text.usetex": False,
+    "text.usetex": True,
     "text.latex.preamble": "",
-    "font.family": "DejaVu Sans",
 }
 plt.rcParams.update(PLOT_RC)
 
@@ -40,6 +42,10 @@ PRIMITIVE_ENV_ID = "Office-v0"
 METHODS = ("minmax", "boolean")
 METHOD_LABELS = {"minmax": r"Univ./Empty (Ours)", "boolean": r"Base Tasks"}
 COLORS = dict(zip(METHODS, plt.cm.tab10.colors[:2]))
+TITLE_FONTSIZE = 16
+LABEL_FONTSIZE = 16
+TICK_FONTSIZE = 14
+LEGEND_FONTSIZE = 16
 TASK_LABELS = {
     "coffee": "Coffee",
     "patrol": "Patrol",
@@ -674,7 +680,7 @@ def aggregate_metric_dict(metric_dicts):
     keys = sorted({key for metrics in metric_dicts for key in metrics})
     aggregate = {}
     for key in keys:
-        if key.endswith("_std") and key.removesuffix("_std") in keys:
+        if key.endswith("_std") and key[:-4] in keys:
             continue
         values = np.asarray(
             [metrics[key] for metrics in metric_dicts if key in metrics],
@@ -730,11 +736,11 @@ def aggregate_results(run_results):
 
 def plot_results(results, output):
     with plt.rc_context(PLOT_RC):
+        _set_style()
         output_dir = os.path.dirname(output) or "."
         figure_dir = os.path.join(output_dir, "figures_new")
         os.makedirs(figure_dir, exist_ok=True)
 
-        optimal_results = results.get("optimal", {})
         maxiters = sorted(key for key in results if isinstance(key, int))
         task_names = sorted(
             {
@@ -745,7 +751,7 @@ def plot_results(results, output):
             }
         )
         metrics = (
-            ("returns", "return", "Reward"),
+            ("returns", "return", "Episode return"),
             ("successes", "success_rate", "Success rate"),
             ("value_error", "value_error", "Mean absolute value error"),
         )
@@ -760,8 +766,17 @@ def plot_results(results, output):
             )
             if not has_values:
                 continue
-            fig, axes = plt.subplots(1, len(task_names), figsize=(5 * len(task_names), 4), squeeze=False)
-            for ax, task_name in zip(axes[0], task_names):
+            ncols = min(3, len(task_names))
+            nrows = math.ceil(len(task_names) / ncols)
+            fig, axes = plt.subplots(
+                nrows,
+                ncols,
+                figsize=(5.0 * ncols, 3.8 * nrows),
+                sharex=True,
+                squeeze=False,
+            )
+            axes = axes.reshape(-1)
+            for ax, task_name in zip(axes, task_names):
                 for method in METHODS:
                     values = [results[maxiter][task_name][method].get(key, np.nan) for maxiter in maxiters]
                     std_key = f"{key}_std"
@@ -783,38 +798,78 @@ def plot_results(results, output):
                         label=METHOD_LABELS[method],
                     )
                     ax.fill_between(maxiters, lower, upper, color=COLORS[method], alpha=0.2, linewidth=0)
-                    if key != "value_error" and task_name in optimal_results:
-                        optimal_value = optimal_results[task_name][method][key]
-                        optimal_std = optimal_results[task_name][method].get(std_key, 0.0)
-                        ax.axhline(
-                            optimal_value,
-                            linestyle="--",
-                            linewidth=1,
-                            color=COLORS[method],
-                            alpha=0.8,
-                            label=f"{METHOD_LABELS[method]} optimal",
-                        )
-                        if optimal_std:
-                            opt_lower = optimal_value - optimal_std
-                            opt_upper = optimal_value + optimal_std
-                            if key == "success_rate":
-                                opt_lower = max(0.0, opt_lower)
-                                opt_upper = min(1.0, opt_upper)
-                            ax.axhspan(opt_lower, opt_upper, color=COLORS[method], alpha=0.08)
-                ax.set_title(TASK_LABELS.get(task_name, task_name), fontsize=20)
-                ax.set_xlabel("Total training iterations (for all UVFA summed)", fontsize=20)
-                ax.set_ylabel(ylabel, fontsize=20)
-                ax.tick_params(axis="both", labelsize=18)
-                if len(maxiters) > 1:
-                    ax.set_xscale("log")
-                ax.legend(fontsize=16)
-            for text in fig.findobj(match=matplotlib.text.Text):
-                text.set_usetex(False)
-            fig.tight_layout()
-            fig.savefig(os.path.join(figure_dir, f"{filename}.png"), dpi=200)
-            fig.savefig(os.path.join(figure_dir, f"{filename}.pdf"))
+                ax.set_title(TASK_LABELS.get(task_name, task_name), fontsize=TITLE_FONTSIZE)
+                _format_axis(ax)
+            for ax in axes[len(task_names):]:
+                ax.axis("off")
+            handles, labels = axes[0].get_legend_handles_labels()
+            fig.legend(handles, labels, loc="upper center", ncol=len(labels), fontsize=LEGEND_FONTSIZE)
+            fig.supxlabel("Training iterations per extended value function", fontsize=LABEL_FONTSIZE)
+            fig.supylabel(ylabel, fontsize=LABEL_FONTSIZE)
+            fig.tight_layout(rect=(0.02, 0.02, 1, 0.92))
+            fig.savefig(os.path.join(figure_dir, f"{filename}.png"), bbox_inches="tight", dpi=200)
+            fig.savefig(os.path.join(figure_dir, f"{filename}.pdf"), bbox_inches="tight")
             plt.close(fig)
+
+            if key in ("return", "success_rate"):
+                fig, ax = plt.subplots(figsize=(6, 4.5))
+                for method in METHODS:
+                    means = []
+                    spreads = []
+                    for maxiter in maxiters:
+                        task_values = [
+                            results[maxiter][task_name][method].get(key, np.nan)
+                            for task_name in task_names
+                            if task_name in results[maxiter] and method in results[maxiter][task_name]
+                        ]
+                        task_values = np.asarray(task_values, dtype=float)
+                        task_values = task_values[np.isfinite(task_values)]
+                        if len(task_values) == 0:
+                            means.append(np.nan)
+                            spreads.append(0.0)
+                        else:
+                            means.append(float(np.mean(task_values)))
+                            spreads.append(float(np.std(task_values)))
+
+                    means = np.asarray(means, dtype=float)
+                    spreads = np.asarray(spreads, dtype=float)
+                    lower = means - spreads
+                    upper = means + spreads
+                    if key == "success_rate":
+                        lower = np.clip(lower, 0.0, 1.0)
+                        upper = np.clip(upper, 0.0, 1.0)
+                    ax.plot(
+                        maxiters,
+                        means,
+                        "o-",
+                        color=COLORS[method],
+                        linewidth=2,
+                        markersize=6,
+                        label=METHOD_LABELS[method],
+                    )
+                    ax.fill_between(maxiters, lower, upper, color=COLORS[method], alpha=0.2, linewidth=0)
+
+                _format_axis(ax, with_xlabel=True, ylabel=ylabel)
+                ax.legend(fontsize=LEGEND_FONTSIZE)
+                fig.tight_layout()
+                fig.savefig(os.path.join(figure_dir, f"average_{filename}.png"), bbox_inches="tight", dpi=200)
+                fig.savefig(os.path.join(figure_dir, f"average_{filename}.pdf"), bbox_inches="tight")
+                plt.close(fig)
         print(f"Plots saved to {figure_dir}")
+
+
+def _set_style():
+    rc("text", usetex=True)
+    sns.set_context("notebook", font_scale=0.8)
+
+
+def _format_axis(ax, with_xlabel=False, ylabel=None):
+    ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
+    if with_xlabel:
+        ax.set_xlabel("Training iterations per extended value function", fontsize=LABEL_FONTSIZE)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=LABEL_FONTSIZE)
+    ax.set_xscale("log")
 
 
 def eval_all_runs(args):
@@ -849,7 +904,9 @@ def make_plots(args):
 
 
 def run(args):
-    if args.make_plots:
+    if args.plot_only and args.eval_only:
+        raise ValueError("--plot_only cannot be used with --eval_only")
+    if args.make_plots or args.plot_only:
         return make_plots(args)
     if args.eval_only:
         return eval_all_runs(args)
@@ -905,6 +962,8 @@ def build_parser():
     parser.add_argument("--train-label", choices=RUN_LABELS, default=None, help="Checkpoint label to train for this run")
     parser.add_argument("--eval-only", action="store_true", dest="eval_only", help="Alias for --eval_only")
     parser.add_argument("--make-plots", action="store_true", help="Only load --output and write figures_new plots")
+    parser.add_argument("--plot_only", action="store_true", help="Only load --output and write figures_new plots")
+    parser.add_argument("--plot-only", action="store_true", dest="plot_only", help="Alias for --plot_only")
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb-project", default="skill-machines-convergence")
     parser.add_argument("--wandb-name", default=None)
@@ -912,4 +971,8 @@ def build_parser():
 
 
 if __name__ == "__main__":
-    run(build_parser().parse_args())
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.plot_only and args.eval_only:
+        parser.error("--plot_only cannot be used with --eval_only")
+    run(args)

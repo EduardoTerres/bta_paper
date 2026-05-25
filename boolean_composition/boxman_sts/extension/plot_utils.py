@@ -16,8 +16,8 @@ COLORS = plt.cm.tab10.colors[:2]
 TASK_LABELS = {
     "B": "Blue",
     "S": "Square",
-    "B+S": "Blue or Square",
-    "B.S": "Blue and Square",
+    "B+S": r"Blue $\vee$ Square",
+    "B.S": r"Blue $\wedge$ Square",
     "BxorS": "Blue xor Square",
 }
 HEATMAP_CMAP = LinearSegmentedColormap.from_list(
