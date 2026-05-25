@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --partition=gpu_a100
+#SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
 #SBATCH --job-name=boxman-conv
 #SBATCH --ntasks=1
