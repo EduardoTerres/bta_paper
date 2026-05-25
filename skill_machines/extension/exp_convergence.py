@@ -37,8 +37,15 @@ TASK_ENVS = {
     "long": "Office-Long-Task-v0",
 }
 PRIMITIVE_ENV_ID = "Office-v0"
-METHODS = ("boolean", "minmax")
-COLORS = {"boolean": "steelblue", "minmax": "tomato"}
+METHODS = ("minmax", "boolean")
+METHOD_LABELS = {"minmax": r"Univ./Empty (Ours)", "boolean": r"Base Tasks"}
+COLORS = dict(zip(METHODS, plt.cm.tab10.colors[:2]))
+TASK_LABELS = {
+    "coffee": "Coffee",
+    "patrol": "Patrol",
+    "coffee_mail": "Coffee and Mail",
+    "long": "Long",
+}
 RMIN_ENV_VARS = ("RMIN", "SM_RMIN")
 RUN_LABELS = ("boolean", "optimal")
 DEFAULT_RUNS = 3
@@ -766,8 +773,16 @@ def plot_results(results, output):
                     if key == "success_rate":
                         lower = np.clip(lower, 0.0, 1.0)
                         upper = np.clip(upper, 0.0, 1.0)
-                    ax.plot(maxiters, values, marker="o", label=method, color=COLORS[method])
-                    ax.fill_between(maxiters, lower, upper, color=COLORS[method], alpha=0.18, linewidth=0)
+                    ax.plot(
+                        maxiters,
+                        values,
+                        "o-",
+                        color=COLORS[method],
+                        linewidth=2,
+                        markersize=6,
+                        label=METHOD_LABELS[method],
+                    )
+                    ax.fill_between(maxiters, lower, upper, color=COLORS[method], alpha=0.2, linewidth=0)
                     if key != "value_error" and task_name in optimal_results:
                         optimal_value = optimal_results[task_name][method][key]
                         optimal_std = optimal_results[task_name][method].get(std_key, 0.0)
@@ -777,7 +792,7 @@ def plot_results(results, output):
                             linewidth=1,
                             color=COLORS[method],
                             alpha=0.8,
-                            label=f"{method} optimal",
+                            label=f"{METHOD_LABELS[method]} optimal",
                         )
                         if optimal_std:
                             opt_lower = optimal_value - optimal_std
@@ -786,12 +801,13 @@ def plot_results(results, output):
                                 opt_lower = max(0.0, opt_lower)
                                 opt_upper = min(1.0, opt_upper)
                             ax.axhspan(opt_lower, opt_upper, color=COLORS[method], alpha=0.08)
-                ax.set_title(task_name)
-                ax.set_xlabel("Training steps")
-                ax.set_ylabel(ylabel)
+                ax.set_title(TASK_LABELS.get(task_name, task_name), fontsize=20)
+                ax.set_xlabel("Total training iterations (for all UVFA summed)", fontsize=20)
+                ax.set_ylabel(ylabel, fontsize=20)
+                ax.tick_params(axis="both", labelsize=18)
                 if len(maxiters) > 1:
                     ax.set_xscale("log")
-                ax.legend()
+                ax.legend(fontsize=16)
             for text in fig.findobj(match=matplotlib.text.Text):
                 text.set_usetex(False)
             fig.tight_layout()

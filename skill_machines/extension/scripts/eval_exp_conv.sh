@@ -22,11 +22,12 @@ eval_args=(
   --tasks coffee,patrol,coffee_mail,long
   --maxiters 1000,10000,50000,100000,200000,500000,800000,1000000
   --optimal_reference max_observed
+  --rmin 0
   --num_runs 500
   --output skill_machines/extension/exps_data_extension/sm_convergence_new.pkl
 )
 
-python skill_machines/extension/exp_convergence.py "${eval_args[@]}"
+# python skill_machines/extension/exp_convergence.py "${eval_args[@]}"
 
 plot_args=(
   --output skill_machines/extension/exps_data_extension/sm_convergence_new.pkl

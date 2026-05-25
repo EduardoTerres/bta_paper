@@ -26,6 +26,7 @@ python skill_machines/extension/exp_convergence.py \
   --tasks coffee,patrol,coffee_mail,long \
   --maxiters 1000,10000,50000,100000,200000,500000,800000,1000000 \
   --optimal_reference none \
+  --rmin 0 \
   --num_runs 500 \
   --run "$run" \
   --train-label "$label" \
