@@ -17,7 +17,6 @@ args=(
     --output boxman_sts/data/convergence_returns.h5
     --figure boxman_sts/plots/convergence_returns.png
     --eval-only
-    --make-plots
     --wandb
     --require-cuda
     # --debug

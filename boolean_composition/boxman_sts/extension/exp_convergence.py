@@ -21,7 +21,6 @@ sys.path.insert(0, str(ROOT))
 
 from dqn import Agent, ComposedDQN, ComposedDQN_onoff, FloatTensor
 from gym_repoman.envs import CollectEnv
-from plot_utils import by_task_figure_path, plot_convergence, plot_convergence_by_task
 from trainer import load, save
 from wrappers import MaxLength, WarpFrame
 
@@ -370,14 +369,6 @@ def run(args):
         args.max_trajectory = min(args.max_trajectory, 5)
         args.wandb = False
 
-    if args.make_plots:
-        returns_per_steps = dd.io.load(str(args.output))
-        plot_convergence(returns_per_steps, args.figure)
-        task_figure = by_task_figure_path(args.figure)
-        plot_convergence_by_task(returns_per_steps, task_figure)
-        print(f"Saved plots: {args.figure}, {task_figure}")
-        return
-
     checkpoint_steps = sorted(set(args.max_timesteps))
     goals = dd.io.load(str(ROOT / "goals.h5"))
     if args.require_cuda and not torch.cuda.is_available():
@@ -530,11 +521,6 @@ def parse_args():
         "--eval-only",
         action="store_true",
         help="Skip training and average all complete saved runs for the requested grid.",
-    )
-    parser.add_argument(
-        "--make-plots",
-        action="store_true",
-        help="Load --output and write plots without training or evaluation.",
     )
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb-project", default="boxman-sts-convergence")
