@@ -1,5 +1,4 @@
 import argparse
-import copy
 import os
 import pickle
 import random
@@ -39,13 +38,8 @@ TASK_ENVS = {
 PRIMITIVE_ENV_ID = "Office-v0"
 METHODS = ("boolean", "minmax")
 COLORS = {"boolean": "steelblue", "minmax": "tomato"}
+DEFAULT_OUTPUT = os.path.join(SCRIPT_DIR, "exps_data_extension", "sm_convergence.pkl")
 RMIN_ENV_VARS = ("RMIN", "SM_RMIN")
-RUN_LABELS = ("boolean", "optimal")
-DEFAULT_RUNS = 3
-DEFAULT_OUTPUT = os.path.join(SCRIPT_DIR, "exps_data_extension", "sm_convergence_new.pkl")
-DEFAULT_RUNS_DIR = os.path.join(SCRIPT_DIR, "exps_data_extension", "runs_new")
-DEFAULT_SP_DIR = os.path.join(SCRIPT_DIR, "exps_data_extension", "sp_ql_new")
-DEFAULT_LOG_DIR = os.path.join(SCRIPT_DIR, "exps_data_extension", "logs_new")
 
 
 def parse_maxiters(raw):
@@ -68,9 +62,6 @@ def apply_debug_defaults(args):
     args.maxiters = args.debug_maxiters
     args.optimal_iters = args.debug_optimal_iters
     args.eval_steps = args.debug_eval_steps
-    args.num_runs = min(args.num_runs, args.debug_num_runs)
-    args.value_episodes = min(args.value_episodes, args.debug_value_episodes)
-    args.print_freq = min(args.print_freq, args.debug_print_freq)
     return args
 
 
@@ -116,7 +107,7 @@ def configure_output_paths(args):
                 SCRIPT_DIR,
                 "exps_data_extension",
                 run_id,
-                "sm_convergence_new.pkl",
+                "sm_convergence.pkl",
             )
     return args
 
@@ -125,7 +116,7 @@ def ensure_no_existing_file(path, args, description):
     if os.path.exists(path) and not args.overwrite:
         raise FileExistsError(
             f"{description} already exists: {path}\n"
-            "Choose a different --output/--run_id."
+            "Choose a different --output/--run_id or pass --overwrite."
         )
 
 
@@ -133,7 +124,7 @@ def ensure_writable_run_dir(path, args, description):
     if os.path.isdir(path) and os.listdir(path) and not args.overwrite:
         raise FileExistsError(
             f"{description} already has files: {path}\n"
-            "Choose a different --run_id/--sp_dir/--log_dir."
+            "Choose a different --run_id/--sp_dir/--log_dir or pass --overwrite."
         )
     os.makedirs(path, exist_ok=True)
 
@@ -155,6 +146,7 @@ def save_primitives(primitive_env, SP, sp_dir, args):
 
 
 def restore_best_primitives(primitive_env, SP, sp_dir):
+    """Load saved primitive WVFs into the in-memory agents."""
     goals_path = os.path.join(sp_dir, "goals")
     if not os.path.exists(goals_path):
         return SP
@@ -250,72 +242,6 @@ def train_primitives_once(total_steps, args, label="boolean"):
     return primitive_env, SP, sp_dir
 
 
-def default_wandb_name(args, suffix=None):
-    if args.wandb_name:
-        base = args.wandb_name
-    elif args.eval_only:
-        base = "eval"
-    elif args.run is not None and args.train_label:
-        base = f"run_{args.run:03d}-{args.train_label}"
-    else:
-        base = "convergence"
-    return f"{base}-{suffix}" if suffix else base
-
-
-def init_wandb(args, suffix=None):
-    if not args.wandb:
-        return None
-
-    import wandb
-
-    run = wandb.init(
-        project=args.wandb_project,
-        name=default_wandb_name(args, suffix),
-        config=vars(args),
-    )
-    wandb.define_metric("train/step")
-    wandb.define_metric("train/*", step_metric="train/step")
-    wandb.define_metric("eval/training_steps")
-    wandb.define_metric("eval/*", step_metric="eval/training_steps")
-    return run
-
-
-def log_training_checkpoint(wandb_run, args, label, total_steps):
-    if not wandb_run:
-        return
-    wandb_run.log(
-        {
-            "train/step": total_steps,
-            "train/run": args.run,
-            "train/label": label,
-            "train/rmin": args.rmin,
-            "train/complete": 1,
-        },
-        step=total_steps,
-    )
-
-
-def log_eval_results(wandb_run, results):
-    if not wandb_run:
-        return
-    for total_steps in sorted(key for key in results if isinstance(key, int)):
-        payload = {"eval/training_steps": total_steps}
-        for task_name, task_results in results[total_steps].items():
-            for method, metrics in task_results.items():
-                prefix = f"eval/{task_name}/{method}"
-                for metric_name, value in metrics.items():
-                    if np.isscalar(value) and np.isfinite(value):
-                        payload[f"{prefix}/{metric_name}"] = float(value)
-        wandb_run.log(payload, step=total_steps)
-
-
-def learned_sm(primitive_env, SP, method):
-    from sm import SkillMachine, MinMaxSkillMachine
-
-    sm_cls = MinMaxSkillMachine if method == "minmax" else SkillMachine
-    return sm_cls(primitive_env, SP, goal_directed=True)
-
-
 def evaluate_once(primitive_env, task_env, SP, env_id, method, total_steps, args):
     run_name = f"{env_id}/{method}/{total_steps}"
     print(f"[eval] {run_name}")
@@ -358,6 +284,13 @@ def evaluate_once(primitive_env, task_env, SP, env_id, method, total_steps, args
     }
 
 
+def learned_sm(primitive_env, SP, method):
+    from sm import SkillMachine, MinMaxSkillMachine
+
+    sm_cls = MinMaxSkillMachine if method == "minmax" else SkillMachine
+    return sm_cls(primitive_env, SP, goal_directed=True)
+
+
 def scalar_value(value):
     return float(np.asarray(value).reshape(-1)[0])
 
@@ -392,6 +325,7 @@ def value_error_once(primitive_env, SP, optimal_primitive_env, optimal_SP, env_i
 
 
 def apply_max_observed_optimal(results):
+    """Use the best observed task metric as the plotted/saved optimal reference."""
     maxiters = sorted(key for key in results if isinstance(key, int))
     optimal_results = results.setdefault("optimal", {})
     task_names = sorted(
@@ -442,7 +376,87 @@ def apply_max_observed_optimal(results):
             )
 
 
-def run_once(args):
+def plot_results(results, output):
+    with plt.rc_context(PLOT_RC):
+        output_dir = os.path.dirname(output) or "."
+        figure_dir = os.path.join(output_dir, "figures")
+        os.makedirs(figure_dir, exist_ok=True)
+
+        optimal_results = results.get("optimal", {})
+        maxiters = sorted(key for key in results if isinstance(key, int))
+        task_names = sorted(
+            {
+                task
+                for key, tasks in results.items()
+                if isinstance(key, int)
+                for task in tasks
+            }
+        )
+        metrics = (
+            ("returns", "return", "Reward"),
+            ("successes", "success_rate", "Success rate"),
+            ("value_error", "value_error", "Mean absolute value error"),
+        )
+
+        for filename, key, ylabel in metrics:
+            has_values = any(
+                np.isfinite(results[maxiter][task_name][method].get(key, np.nan))
+                for maxiter in maxiters
+                for task_name in task_names
+                for method in METHODS
+                if task_name in results[maxiter] and method in results[maxiter][task_name]
+            )
+            if not has_values:
+                continue
+            fig, axes = plt.subplots(1, len(task_names), figsize=(5 * len(task_names), 4), squeeze=False)
+            for ax, task_name in zip(axes[0], task_names):
+                for method in METHODS:
+                    values = [results[maxiter][task_name][method].get(key, np.nan) for maxiter in maxiters]
+                    std_key = f"{key}_std"
+                    stds = [results[maxiter][task_name][method].get(std_key, 0.0) for maxiter in maxiters]
+                    values = np.asarray(values, dtype=float)
+                    stds = np.asarray(stds, dtype=float)
+                    lower = values - stds
+                    upper = values + stds
+                    if key == "success_rate":
+                        lower = np.clip(lower, 0.0, 1.0)
+                        upper = np.clip(upper, 0.0, 1.0)
+                    ax.plot(maxiters, values, marker="o", label=method, color=COLORS[method])
+                    ax.fill_between(maxiters, lower, upper, color=COLORS[method], alpha=0.18, linewidth=0)
+                    if key != "value_error" and task_name in optimal_results:
+                        optimal_value = optimal_results[task_name][method][key]
+                        optimal_std = optimal_results[task_name][method].get(std_key, 0.0)
+                        ax.axhline(
+                            optimal_value,
+                            linestyle="--",
+                            linewidth=1,
+                            color=COLORS[method],
+                            alpha=0.8,
+                            label=f"{method} optimal",
+                        )
+                        if optimal_std:
+                            opt_lower = optimal_value - optimal_std
+                            opt_upper = optimal_value + optimal_std
+                            if key == "success_rate":
+                                opt_lower = max(0.0, opt_lower)
+                                opt_upper = min(1.0, opt_upper)
+                            ax.axhspan(opt_lower, opt_upper, color=COLORS[method], alpha=0.08)
+                ax.set_title(task_name)
+                ax.set_xlabel("Training steps")
+                ax.set_ylabel(ylabel)
+                if len(maxiters) > 1:
+                    ax.set_xscale("log")
+                ax.legend()
+            for text in fig.findobj(match=matplotlib.text.Text):
+                text.set_usetex(False)
+            fig.tight_layout()
+            fig.savefig(os.path.join(figure_dir, f"{filename}.png"), dpi=200)
+            fig.savefig(os.path.join(figure_dir, f"{filename}.pdf"))
+            plt.close(fig)
+        print(f"Plots saved to {figure_dir}")
+
+
+def run(args):
     args = apply_debug_defaults(args)
     args = resolve_rmin(args)
     args = configure_output_paths(args)
@@ -581,268 +595,8 @@ def run_once(args):
     return results
 
 
-def run_path(base_dir, run_idx):
-    return os.path.join(base_dir, f"run_{run_idx:03d}")
-
-
-def child_args(args, run_idx, configure=True):
-    child = copy.copy(args)
-    child.run_id = None
-    child.sp_dir = run_path(args.sp_dir, run_idx)
-    child.log_dir = run_path(args.log_dir, run_idx)
-    child.output = os.path.join(run_path(args.runs_dir, run_idx), "sm_convergence.pkl")
-    child.plot = False
-    if args.seed is not None:
-        child.seed = args.seed + run_idx
-    if configure:
-        return configure_output_paths(child)
-    return child
-
-
-def required_labels(args):
-    labels = ["boolean"]
-    if args.optimal_reference == "long_run":
-        labels.append("optimal")
-    return labels
-
-
-def label_steps(label, args):
-    if label == "optimal":
-        return [args.optimal_iters]
-    return parse_maxiters(args.maxiters)
-
-
-def train_label(args):
-    args = apply_debug_defaults(args)
-    args = resolve_rmin(args)
-    if args.run is None:
-        raise ValueError("Training requires --run. Use Slurm arrays over --run and --train-label.")
-    if args.train_label is None:
-        raise ValueError("Training requires --train-label boolean or optimal.")
-
-    train_args = child_args(args, args.run)
-    wandb_run = init_wandb(args)
-    print(f"Training run_{args.run:03d}/{args.train_label}")
-    try:
-        for total_steps in tqdm(label_steps(args.train_label, train_args), desc=args.train_label):
-            train_primitives_once(total_steps, train_args, label=args.train_label)
-            log_training_checkpoint(wandb_run, args, args.train_label, total_steps)
-    finally:
-        if wandb_run:
-            wandb_run.finish()
-
-
-def complete_run(run_idx, args):
-    eval_args = child_args(args, run_idx)
-    try:
-        for label in required_labels(args):
-            for total_steps in label_steps(label, eval_args):
-                sp_dir = primitive_run_dir(
-                    total_steps,
-                    eval_args,
-                    label=label,
-                    env_id=checkpoint_env(eval_args),
-                )
-                require_checkpoint(sp_dir, eval_args)
-    except FileNotFoundError:
-        return False
-    return True
-
-
-def completed_runs(args):
-    return [run_idx for run_idx in range(args.runs) if complete_run(run_idx, args)]
-
-
-def eval_single_run(args, run_idx):
-    eval_args = child_args(args, run_idx, configure=False)
-    eval_args.eval_only = True
-    eval_args.overwrite = True
-    eval_args.plot = False
-    os.makedirs(os.path.dirname(eval_args.output), exist_ok=True)
-    print(f"Evaluating run_{run_idx:03d}")
-    return run_once(eval_args)
-
-
-def aggregate_metric_dict(metric_dicts):
-    keys = sorted({key for metrics in metric_dicts for key in metrics})
-    aggregate = {}
-    for key in keys:
-        if key.endswith("_std") and key.removesuffix("_std") in keys:
-            continue
-        values = np.asarray(
-            [metrics[key] for metrics in metric_dicts if key in metrics],
-            dtype=float,
-        )
-        if not len(values):
-            continue
-        aggregate[key] = float(np.mean(values))
-        std_key = f"{key}_std"
-        if std_key in keys:
-            aggregate[std_key] = float(np.std(values))
-    return aggregate
-
-
-def aggregate_results(run_results):
-    aggregate = {}
-    top_keys = sorted(
-        {key for result in run_results for key in result},
-        key=lambda item: (not isinstance(item, str), item),
-    )
-    for key in top_keys:
-        if key == "optimal":
-            aggregate[key] = {}
-            task_names = sorted({task for result in run_results for task in result.get(key, {})})
-            for task_name in task_names:
-                aggregate[key][task_name] = {}
-                for method in METHODS:
-                    metrics = [
-                        result[key][task_name][method]
-                        for result in run_results
-                        if task_name in result.get(key, {}) and method in result[key][task_name]
-                    ]
-                    if metrics:
-                        aggregate[key][task_name][method] = aggregate_metric_dict(metrics)
-            continue
-
-        if not isinstance(key, int):
-            continue
-        aggregate[key] = {}
-        task_names = sorted({task for result in run_results for task in result.get(key, {})})
-        for task_name in task_names:
-            aggregate[key][task_name] = {}
-            for method in METHODS:
-                metrics = [
-                    result[key][task_name][method]
-                    for result in run_results
-                    if task_name in result.get(key, {}) and method in result[key][task_name]
-                ]
-                if metrics:
-                    aggregate[key][task_name][method] = aggregate_metric_dict(metrics)
-    return aggregate
-
-
-def plot_results(results, output):
-    with plt.rc_context(PLOT_RC):
-        output_dir = os.path.dirname(output) or "."
-        figure_dir = os.path.join(output_dir, "figures_new")
-        os.makedirs(figure_dir, exist_ok=True)
-
-        optimal_results = results.get("optimal", {})
-        maxiters = sorted(key for key in results if isinstance(key, int))
-        task_names = sorted(
-            {
-                task
-                for key, tasks in results.items()
-                if isinstance(key, int)
-                for task in tasks
-            }
-        )
-        metrics = (
-            ("returns", "return", "Reward"),
-            ("successes", "success_rate", "Success rate"),
-            ("value_error", "value_error", "Mean absolute value error"),
-        )
-
-        for filename, key, ylabel in metrics:
-            has_values = any(
-                np.isfinite(results[maxiter][task_name][method].get(key, np.nan))
-                for maxiter in maxiters
-                for task_name in task_names
-                for method in METHODS
-                if task_name in results[maxiter] and method in results[maxiter][task_name]
-            )
-            if not has_values:
-                continue
-            fig, axes = plt.subplots(1, len(task_names), figsize=(5 * len(task_names), 4), squeeze=False)
-            for ax, task_name in zip(axes[0], task_names):
-                for method in METHODS:
-                    values = [results[maxiter][task_name][method].get(key, np.nan) for maxiter in maxiters]
-                    std_key = f"{key}_std"
-                    stds = [results[maxiter][task_name][method].get(std_key, 0.0) for maxiter in maxiters]
-                    values = np.asarray(values, dtype=float)
-                    stds = np.asarray(stds, dtype=float)
-                    lower = values - stds
-                    upper = values + stds
-                    if key == "success_rate":
-                        lower = np.clip(lower, 0.0, 1.0)
-                        upper = np.clip(upper, 0.0, 1.0)
-                    ax.plot(maxiters, values, marker="o", label=method, color=COLORS[method])
-                    ax.fill_between(maxiters, lower, upper, color=COLORS[method], alpha=0.18, linewidth=0)
-                    if key != "value_error" and task_name in optimal_results:
-                        optimal_value = optimal_results[task_name][method][key]
-                        optimal_std = optimal_results[task_name][method].get(std_key, 0.0)
-                        ax.axhline(
-                            optimal_value,
-                            linestyle="--",
-                            linewidth=1,
-                            color=COLORS[method],
-                            alpha=0.8,
-                            label=f"{method} optimal",
-                        )
-                        if optimal_std:
-                            opt_lower = optimal_value - optimal_std
-                            opt_upper = optimal_value + optimal_std
-                            if key == "success_rate":
-                                opt_lower = max(0.0, opt_lower)
-                                opt_upper = min(1.0, opt_upper)
-                            ax.axhspan(opt_lower, opt_upper, color=COLORS[method], alpha=0.08)
-                ax.set_title(task_name)
-                ax.set_xlabel("Training steps")
-                ax.set_ylabel(ylabel)
-                if len(maxiters) > 1:
-                    ax.set_xscale("log")
-                ax.legend()
-            for text in fig.findobj(match=matplotlib.text.Text):
-                text.set_usetex(False)
-            fig.tight_layout()
-            fig.savefig(os.path.join(figure_dir, f"{filename}.png"), dpi=200)
-            fig.savefig(os.path.join(figure_dir, f"{filename}.pdf"))
-            plt.close(fig)
-        print(f"Plots saved to {figure_dir}")
-
-
-def eval_all_runs(args):
-    args = apply_debug_defaults(args)
-    args = resolve_rmin(args)
-    done = completed_runs(args)
-    if not done:
-        raise RuntimeError("No complete new convergence runs found to evaluate.")
-    print("Evaluating runs:", ", ".join(f"run_{idx:03d}" for idx in done))
-    wandb_run = init_wandb(args)
-    run_results = [eval_single_run(args, run_idx) for run_idx in done]
-    results = aggregate_results(run_results)
-    if args.optimal_reference == "max_observed":
-        apply_max_observed_optimal(results)
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    with open(args.output, "wb") as f:
-        pickle.dump(results, f)
-    print(f"Results saved to {args.output}")
-    log_eval_results(wandb_run, results)
-    if wandb_run:
-        wandb_run.save(args.output)
-        wandb_run.finish()
-    if args.plot:
-        plot_results(results, args.output)
-    return results
-
-
-def make_plots(args):
-    with open(args.output, "rb") as f:
-        results = pickle.load(f)
-    plot_results(results, args.output)
-
-
-def run(args):
-    if args.make_plots:
-        return make_plots(args)
-    if args.eval_only:
-        return eval_all_runs(args)
-    return train_label(args)
-
-
 def build_parser():
     parser = argparse.ArgumentParser()
-    parser.set_defaults(overwrite=True)
     parser.add_argument("--maxiters", default="100000,200000,400000,600000,800000,1000000", help="Comma-separated training steps for each experiment")
     parser.add_argument("--optimal_iters", type=int, default=5000000, help="Training steps for the long-run optimal value-function reference")
     parser.add_argument(
@@ -861,6 +615,7 @@ def build_parser():
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
     parser.add_argument("--rmin", type=float, default=None)
     parser.add_argument("--run_id", default=None)
+    parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--gamma", type=float, default=0.9)
     parser.add_argument("--eval_gamma", type=float, default=0.9)
@@ -871,27 +626,15 @@ def build_parser():
     parser.add_argument("--value_episodes", type=int, default=10, help="Episodes sampled to estimate convergence to the optimal value function")
     parser.add_argument("--print_freq", type=int, default=10000)
     parser.add_argument("--checkpoint_metric", choices=("success", "return", "both"), default="both", help="Metric used to keep the best primitive checkpoint during training")
-    parser.add_argument("--sp_dir", default=DEFAULT_SP_DIR)
-    parser.add_argument("--log_dir", default=DEFAULT_LOG_DIR)
+    parser.add_argument("--sp_dir", default=os.path.join(SCRIPT_DIR, "exps_data_extension", "sp_ql"))
+    parser.add_argument("--log_dir", default=os.path.join(SCRIPT_DIR, "exps_data_extension", "logs"))
     parser.add_argument("--eval_only", action="store_true", help="Skip primitive training and evaluate existing shared checkpoints")
     parser.add_argument("--plot", action="store_true", default=True, help="Save convergence plots")
     parser.add_argument("--no_plot", action="store_false", dest="plot", help="Disable plot generation")
     parser.add_argument("--debug", action="store_true", help="Use low training/evaluation steps with the same experiment setup")
-    parser.add_argument("--debug_maxiters", default="1000", help="Training steps used when --debug is set")
-    parser.add_argument("--debug_optimal_iters", type=int, default=2000, help="Optimal-reference training steps used when --debug is set")
-    parser.add_argument("--debug_eval_steps", type=int, default=20, help="Evaluation horizon used when --debug is set")
-    parser.add_argument("--debug_num_runs", type=int, default=2, help="Evaluation episodes used when --debug is set")
-    parser.add_argument("--debug_value_episodes", type=int, default=2, help="Value-error episodes used when --debug is set")
-    parser.add_argument("--debug_print_freq", type=int, default=100, help="Training print frequency used when --debug is set")
-    parser.add_argument("--runs", type=int, default=DEFAULT_RUNS, help="Maximum number of independent value-function runs")
-    parser.add_argument("--run", type=int, default=None, help="Single run index to train, usually from a Slurm array")
-    parser.add_argument("--runs_dir", default=DEFAULT_RUNS_DIR, help="Per-run evaluation cache directory")
-    parser.add_argument("--train-label", choices=RUN_LABELS, default=None, help="Checkpoint label to train for this run")
-    parser.add_argument("--eval-only", action="store_true", dest="eval_only", help="Alias for --eval_only")
-    parser.add_argument("--make-plots", action="store_true", help="Only load --output and write figures_new plots")
-    parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--wandb-project", default="skill-machines-convergence")
-    parser.add_argument("--wandb-name", default=None)
+    parser.add_argument("--debug_maxiters", default="100000", help="Training steps used when --debug is set")
+    parser.add_argument("--debug_optimal_iters", type=int, default=200000, help="Optimal-reference training steps used when --debug is set")
+    parser.add_argument("--debug_eval_steps", type=int, default=50, help="Evaluation horizon used when --debug is set")
     return parser
 
 
