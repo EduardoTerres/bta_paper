@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import pickle
 import random
@@ -10,7 +11,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 import torch
+from matplotlib import rc
 from tqdm import tqdm
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,9 +26,8 @@ from sm import TaskPrimitive
 from sm_ql import QLAgent, learn
 
 PLOT_RC = {
-    "text.usetex": False,
+    "text.usetex": True,
     "text.latex.preamble": "",
-    "font.family": "DejaVu Sans",
 }
 plt.rcParams.update(PLOT_RC)
 
@@ -36,8 +38,19 @@ TASK_ENVS = {
     "long": "Office-Long-Task-v0",
 }
 PRIMITIVE_ENV_ID = "Office-v0"
-METHODS = ("boolean", "minmax")
-COLORS = {"boolean": "steelblue", "minmax": "tomato"}
+METHODS = ("minmax", "boolean")
+METHOD_LABELS = {"minmax": r"Univ./Empty (Ours)", "boolean": r"Base Tasks"}
+COLORS = dict(zip(METHODS, plt.cm.tab10.colors[:2]))
+TITLE_FONTSIZE = 16
+LABEL_FONTSIZE = 16
+TICK_FONTSIZE = 14
+LEGEND_FONTSIZE = 16
+TASK_LABELS = {
+    "coffee": "Coffee",
+    "patrol": "Patrol",
+    "coffee_mail": "Coffee and Mail",
+    "long": "Long",
+}
 DEFAULT_OUTPUT = os.path.join(SCRIPT_DIR, "exps_data_extension", "sm_convergence.pkl")
 RMIN_ENV_VARS = ("RMIN", "SM_RMIN")
 
@@ -378,6 +391,7 @@ def apply_max_observed_optimal(results):
 
 def plot_results(results, output):
     with plt.rc_context(PLOT_RC):
+        _set_style()
         output_dir = os.path.dirname(output) or "."
         figure_dir = os.path.join(output_dir, "figures")
         os.makedirs(figure_dir, exist_ok=True)
@@ -393,7 +407,7 @@ def plot_results(results, output):
             }
         )
         metrics = (
-            ("returns", "return", "Reward"),
+            ("returns", "return", "Episode return"),
             ("successes", "success_rate", "Success rate"),
             ("value_error", "value_error", "Mean absolute value error"),
         )
@@ -408,8 +422,17 @@ def plot_results(results, output):
             )
             if not has_values:
                 continue
-            fig, axes = plt.subplots(1, len(task_names), figsize=(5 * len(task_names), 4), squeeze=False)
-            for ax, task_name in zip(axes[0], task_names):
+            ncols = min(3, len(task_names))
+            nrows = math.ceil(len(task_names) / ncols)
+            fig, axes = plt.subplots(
+                nrows,
+                ncols,
+                figsize=(5.0 * ncols, 3.8 * nrows),
+                sharex=True,
+                squeeze=False,
+            )
+            axes = axes.reshape(-1)
+            for ax, task_name in zip(axes, task_names):
                 for method in METHODS:
                     values = [results[maxiter][task_name][method].get(key, np.nan) for maxiter in maxiters]
                     std_key = f"{key}_std"
@@ -421,8 +444,16 @@ def plot_results(results, output):
                     if key == "success_rate":
                         lower = np.clip(lower, 0.0, 1.0)
                         upper = np.clip(upper, 0.0, 1.0)
-                    ax.plot(maxiters, values, marker="o", label=method, color=COLORS[method])
-                    ax.fill_between(maxiters, lower, upper, color=COLORS[method], alpha=0.18, linewidth=0)
+                    ax.plot(
+                        maxiters,
+                        values,
+                        "o-",
+                        color=COLORS[method],
+                        linewidth=2,
+                        markersize=6,
+                        label=METHOD_LABELS[method],
+                    )
+                    ax.fill_between(maxiters, lower, upper, color=COLORS[method], alpha=0.2, linewidth=0)
                     if key != "value_error" and task_name in optimal_results:
                         optimal_value = optimal_results[task_name][method][key]
                         optimal_std = optimal_results[task_name][method].get(std_key, 0.0)
@@ -432,7 +463,7 @@ def plot_results(results, output):
                             linewidth=1,
                             color=COLORS[method],
                             alpha=0.8,
-                            label=f"{method} optimal",
+                            label=f"{METHOD_LABELS[method]} optimal",
                         )
                         if optimal_std:
                             opt_lower = optimal_value - optimal_std
@@ -441,25 +472,108 @@ def plot_results(results, output):
                                 opt_lower = max(0.0, opt_lower)
                                 opt_upper = min(1.0, opt_upper)
                             ax.axhspan(opt_lower, opt_upper, color=COLORS[method], alpha=0.08)
-                ax.set_title(task_name)
-                ax.set_xlabel("Training steps")
-                ax.set_ylabel(ylabel)
-                if len(maxiters) > 1:
-                    ax.set_xscale("log")
-                ax.legend()
-            for text in fig.findobj(match=matplotlib.text.Text):
-                text.set_usetex(False)
-            fig.tight_layout()
-            fig.savefig(os.path.join(figure_dir, f"{filename}.png"), dpi=200)
-            fig.savefig(os.path.join(figure_dir, f"{filename}.pdf"))
+                ax.set_title(TASK_LABELS.get(task_name, task_name), fontsize=TITLE_FONTSIZE)
+                _format_axis(ax)
+            for ax in axes[len(task_names):]:
+                ax.axis("off")
+            handles, labels = axes[0].get_legend_handles_labels()
+            fig.legend(handles, labels, loc="upper center", ncol=len(labels), fontsize=LEGEND_FONTSIZE)
+            fig.supxlabel("Training iterations per extended value function", fontsize=LABEL_FONTSIZE)
+            fig.supylabel(ylabel, fontsize=LABEL_FONTSIZE)
+            fig.tight_layout(rect=(0.02, 0.02, 1, 0.92))
+            fig.savefig(os.path.join(figure_dir, f"{filename}.png"), bbox_inches="tight", dpi=200)
+            fig.savefig(os.path.join(figure_dir, f"{filename}.pdf"), bbox_inches="tight")
             plt.close(fig)
+
+            if key in ("return", "success_rate"):
+                fig, ax = plt.subplots(figsize=(6, 4.5))
+                for method in METHODS:
+                    means = []
+                    spreads = []
+                    for maxiter in maxiters:
+                        task_values = [
+                            results[maxiter][task_name][method].get(key, np.nan)
+                            for task_name in task_names
+                            if task_name in results[maxiter] and method in results[maxiter][task_name]
+                        ]
+                        task_values = np.asarray(task_values, dtype=float)
+                        task_values = task_values[np.isfinite(task_values)]
+                        if len(task_values) == 0:
+                            means.append(np.nan)
+                            spreads.append(0.0)
+                        else:
+                            means.append(float(np.mean(task_values)))
+                            spreads.append(float(np.std(task_values)))
+
+                    means = np.asarray(means, dtype=float)
+                    spreads = np.asarray(spreads, dtype=float)
+                    lower = means - spreads
+                    upper = means + spreads
+                    if key == "success_rate":
+                        lower = np.clip(lower, 0.0, 1.0)
+                        upper = np.clip(upper, 0.0, 1.0)
+                    ax.plot(
+                        maxiters,
+                        means,
+                        "o-",
+                        color=COLORS[method],
+                        linewidth=2,
+                        markersize=6,
+                        label=METHOD_LABELS[method],
+                    )
+                    ax.fill_between(maxiters, lower, upper, color=COLORS[method], alpha=0.2, linewidth=0)
+
+                    optimal_values = [
+                        optimal_results[task_name][method][key]
+                        for task_name in task_names
+                        if task_name in optimal_results and method in optimal_results[task_name]
+                    ]
+                    optimal_values = np.asarray(optimal_values, dtype=float)
+                    optimal_values = optimal_values[np.isfinite(optimal_values)]
+                    if len(optimal_values) > 0:
+                        ax.axhline(
+                            float(np.mean(optimal_values)),
+                            linestyle="--",
+                            linewidth=1,
+                            color=COLORS[method],
+                            alpha=0.8,
+                            label=f"{METHOD_LABELS[method]} optimal",
+                        )
+
+                _format_axis(ax, with_xlabel=True, ylabel=ylabel)
+                ax.legend(fontsize=LEGEND_FONTSIZE)
+                fig.tight_layout()
+                fig.savefig(os.path.join(figure_dir, f"average_{filename}.png"), bbox_inches="tight", dpi=200)
+                fig.savefig(os.path.join(figure_dir, f"average_{filename}.pdf"), bbox_inches="tight")
+                plt.close(fig)
         print(f"Plots saved to {figure_dir}")
+
+
+def _set_style():
+    rc("text", usetex=True)
+    sns.set_context("notebook", font_scale=0.8)
+
+
+def _format_axis(ax, with_xlabel=False, ylabel=None):
+    ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
+    if with_xlabel:
+        ax.set_xlabel("Training iterations per extended value function", fontsize=LABEL_FONTSIZE)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=LABEL_FONTSIZE)
+    ax.set_xscale("log")
 
 
 def run(args):
     args = apply_debug_defaults(args)
     args = resolve_rmin(args)
     args = configure_output_paths(args)
+    if args.plot_only:
+        print(f"Loading results from {args.output}")
+        with open(args.output, "rb") as f:
+            results = pickle.load(f)
+        plot_results(results, args.output)
+        return results
+
     ensure_no_existing_file(args.output, args, "Results output")
     print(f"Using rmin={args.rmin:g} ({args.rmin_source})")
     if args.run_id:
@@ -629,6 +743,7 @@ def build_parser():
     parser.add_argument("--sp_dir", default=os.path.join(SCRIPT_DIR, "exps_data_extension", "sp_ql"))
     parser.add_argument("--log_dir", default=os.path.join(SCRIPT_DIR, "exps_data_extension", "logs"))
     parser.add_argument("--eval_only", action="store_true", help="Skip primitive training and evaluate existing shared checkpoints")
+    parser.add_argument("--plot_only", action="store_true", help="Load --output results and regenerate plots without training or evaluation")
     parser.add_argument("--plot", action="store_true", default=True, help="Save convergence plots")
     parser.add_argument("--no_plot", action="store_false", dest="plot", help="Disable plot generation")
     parser.add_argument("--debug", action="store_true", help="Use low training/evaluation steps with the same experiment setup")
