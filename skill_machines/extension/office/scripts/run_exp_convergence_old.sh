@@ -15,6 +15,6 @@ conda activate sm
 export MPLCONFIGDIR="${SLURM_TMPDIR:-/tmp}/matplotlib"
 mkdir -p "$MPLCONFIGDIR"
 
-python skill_machines/extension/exp_convergence_old.py \
+python skill_machines/extension/office/exp_convergence_old.py \
   --plot_only \
   --output skill_machines/extension/exps_data_extension/sm_convergence.pkl

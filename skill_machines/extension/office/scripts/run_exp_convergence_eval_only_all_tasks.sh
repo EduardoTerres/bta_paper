@@ -1,12 +1,11 @@
 #!/bin/bash
 #SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
-#SBATCH --job-name=conv
+#SBATCH --job-name=conv-eval
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=10:00:00
-#SBATCH --array=0-2
-#SBATCH --output=conv_%A_%a.out
+#SBATCH --output=conv_eval_%A.out
 
 set -euo pipefail
 
@@ -16,18 +15,10 @@ conda activate sm
 export MPLCONFIGDIR="${SLURM_TMPDIR:-/tmp}/matplotlib"
 mkdir -p "$MPLCONFIGDIR"
 
-labels=(boolean)
-num_labels=${#labels[@]}
-run=$((SLURM_ARRAY_TASK_ID / num_labels))
-label=${labels[$((SLURM_ARRAY_TASK_ID % num_labels))]}
-
-
-python skill_machines/extension/exp_convergence.py \
+python skill_machines/extension/office/exp_convergence.py \
+  --eval_only \
   --tasks coffee,patrol,coffee_mail,long \
   --maxiters 1000,10000,50000,100000,200000,500000,800000,1000000 \
-  --optimal_reference none \
-  --rmin 0 \
-  --num_runs 500 \
-  --run "$run" \
-  --train-label "$label" \
-  --wandb
+  --optimal_reference max_observed \
+  --rmin "-1" \
+  --num_runs 500
