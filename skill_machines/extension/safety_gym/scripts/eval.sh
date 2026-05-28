@@ -42,8 +42,11 @@ export LDFLAGS="-L/usr/lib64 -L${CONDA_PREFIX}/lib ${LDFLAGS:-}"
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:$MUJOCO_PY_MUJOCO_PATH/bin:$PROJECT_MUJOCO_COMPAT:${CONDA_PREFIX}/lib:/usr/lib64"
 export MUJOCO_PY_FORCE_CPU="${MUJOCO_PY_FORCE_CPU:-1}"
 
+# Default eval layout is shards: parallel training writes one goals_<primitive>
+# file per WVF. Use --training-output single for older sequential checkpoints.
 python skill_machines/extension/safety_gym/exp_convergence.py \
   --eval_only \
+  --training-output shards \
   --runs 3 \
   --eval_episodes 100 \
   --maxiters 100000,200000,400000,600000,800000,1000000 \

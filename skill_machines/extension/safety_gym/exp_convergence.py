@@ -1,5 +1,4 @@
 import argparse
-import math
 import os
 import pickle
 import random
@@ -8,13 +7,8 @@ import time
 from pathlib import Path
 
 import gymnasium as gym
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from matplotlib.patches import Patch
 from stable_baselines3.common.callbacks import BaseCallback
 from tqdm import tqdm
 
@@ -36,15 +30,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(ROOT))
 
 import envs  # noqa: F401
+from plot_utils import COMPOSITION_TIME_METHODS, METHODS, plot_results
 from sb3_utils import DQNAgent, TD3Agent
 from sm import MinMaxSkillMachine, SkillMachine, TaskPrimitive
-
-NO_LATEX_RC = {
-    "text.usetex": False,
-    "text.latex.preamble": "",
-}
-matplotlib.rcParams.update(NO_LATEX_RC)
-plt.rcParams.update(NO_LATEX_RC)
 
 PRIMITIVE_ENV_ID = "Safety-v0"
 TASK_ENVS = {
@@ -55,30 +43,6 @@ TASK_ENVS = {
     "task5": "Safety-Task-5-v0",
     "task6": "Safety-Task-6-v0",
 }
-TASK_LABELS = {
-    "task1": "Task 1",
-    "task2": "Task 2",
-    "task3": "Task 3",
-    "task4": "Task 4",
-    "task5": "Task 5",
-    "task6": "Task 6",
-}
-METHODS = ("original", "minmax", "boolean")
-METHOD_LABELS = {
-    "original": "Original",
-    "minmax": "Univ./empty",
-    "boolean": "Base tasks",
-}
-COMPOSITION_TIME_METHODS = ("original", "minmax")
-COLORS = {
-    "original": "#1A5276",
-    "minmax": "#C0560A",
-    "boolean": "#2E7D32",
-}
-TITLE_FONTSIZE = 16
-LABEL_FONTSIZE = 16
-TICK_FONTSIZE = 14
-LEGEND_FONTSIZE = 16
 DEFAULT_STEPS = "100000,200000,400000,600000,800000,1000000"
 DEFAULT_OUTPUT = DATA_DIR / "sm_convergence.pkl"
 DEFAULT_RUNS_DIR = DATA_DIR / "runs"
@@ -86,18 +50,14 @@ DEFAULT_LOG_DIR = DATA_DIR / "logs"
 DEFAULT_FIGURES_DIR = FIGURES_DIR
 
 
-def disable_latex_rendering():
-    matplotlib.rcParams.update(NO_LATEX_RC)
-    plt.rcParams.update(NO_LATEX_RC)
-
-
 class CheckpointCallback(BaseCallback):
-    def __init__(self, primitive_env, run_dir, primitive, checkpoints):
+    def __init__(self, primitive_env, run_dir, primitive, checkpoints, training_output):
         super().__init__()
         self.primitive_env = primitive_env
         self.run_dir = Path(run_dir)
         self.primitive = primitive
         self.pending = sorted(set(checkpoints))
+        self.training_output = training_output
 
     def _on_step(self):
         while self.pending and self.num_timesteps >= self.pending[0]:
@@ -105,7 +65,12 @@ class CheckpointCallback(BaseCallback):
             out = checkpoint_dir(self.run_dir, step)
             out.mkdir(parents=True, exist_ok=True)
             self.model.save(out / f"wvf_{self.primitive}")
-            torch.save(self.primitive_env.goals, out / f"goals_{self.primitive}")
+            if self.training_output == "shards":
+                # Parallel training writes one goal snapshot per WVF shard.
+                torch.save(self.primitive_env.goals, out / f"goals_{self.primitive}")
+            else:
+                # Sequential training keeps the legacy single shared goal file.
+                torch.save(self.primitive_env.goals, out / "goals")
             print(f"[checkpoint] {out}/wvf_{self.primitive}")
         return True
 
@@ -320,6 +285,10 @@ def train_run(args):
 
     primitive_env = make_primitive_env()
     primitives = base_primitives(primitive_env)
+    if args.training_output == "shards" and not args.train_primitive:
+        raise ValueError("Shard training requires --train-primitive. Use --training-output single to train all WVFs in one job.")
+    if args.training_output == "single" and args.train_primitive:
+        raise ValueError("--train-primitive is only valid with --training-output shards.")
     if args.train_primitive:
         if args.train_primitive not in primitives:
             raise ValueError(f"Unknown --train-primitive {args.train_primitive}. Choose one of: {', '.join(primitives)}")
@@ -355,6 +324,7 @@ def train_run(args):
                         this_run_dir,
                         primitive,
                         steps,
+                        args.training_output,
                     ),
                 ],
                 reset_num_timesteps=True,
@@ -373,8 +343,16 @@ def complete_run(args, run_idx):
     primitive_env.close()
     for step in parse_steps(args.maxiters):
         step_dir = checkpoint_dir(this_run_dir, step)
-        has_split_goals = all((step_dir / f"goals_{primitive}").exists() for primitive in primitives)
-        if not has_split_goals and not (step_dir / "goals").exists():
+        if args.training_output == "shards":
+            # Parallel training launches one job per WVF. Each shard writes its
+            # own goals_<primitive> file, so a run is complete only when all
+            # shard goal files and all WVF files are present.
+            has_goals = all((step_dir / f"goals_{primitive}").exists() for primitive in primitives)
+        else:
+            # Single-process training writes one shared goals file while it
+            # trains all WVFs sequentially in the same run directory.
+            has_goals = (step_dir / "goals").exists()
+        if not has_goals:
             return False
         for filename in [f"wvf_{primitive}.zip" for primitive in primitives]:
             if not (step_dir / filename).exists():
@@ -390,12 +368,14 @@ def load_primitives(args, run_idx, step):
     step_dir = checkpoint_dir(run_dir(args, run_idx), step)
     primitive_env = make_primitive_env()
     primitives = base_primitives(primitive_env)
-    goals_files = [step_dir / f"goals_{primitive}" for primitive in primitives]
-    if any(path.exists() for path in goals_files):
+    if args.training_output == "shards":
+        # Reassemble the goal buffer from the per-WVF shards produced by
+        # parallel training before loading the individual WVF models.
+        goals_files = [step_dir / f"goals_{primitive}" for primitive in primitives]
         for path in goals_files:
-            if path.exists():
-                primitive_env.goals.update(torch.load(path, map_location="cpu"))
+            primitive_env.goals.update(torch.load(path, map_location="cpu"))
     else:
+        # Backward-compatible layout for runs trained sequentially by one job.
         primitive_env.goals.update(torch.load(step_dir / "goals", map_location="cpu"))
     agents = {
         primitive: make_agent(args.algo, f"wvf_{primitive}", primitive_env, step_dir, None, load=True)
@@ -549,225 +529,6 @@ def eval_all(args):
         plot_results(results, args.output, args.figures_dir)
 
 
-def plot_results(results, output, figures_dir=None):
-    disable_latex_rendering()
-    out_dir = Path(figures_dir) if figures_dir else Path(output).parent / "figures"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    steps = sorted(key for key in results if isinstance(key, int))
-    task_names = sorted({task for step in steps for task in results[step]})
-
-    plot_metric_by_task(results, steps, task_names, "return", "Episode return", out_dir / "returns.png")
-    plot_metric_by_task(results, steps, task_names, "success_rate", "Success rate", out_dir / "successes.png")
-    plot_metric_average(results, steps, task_names, "return", "Episode return", out_dir / "average_returns.png")
-    plot_metric_average(results, steps, task_names, "success_rate", "Success rate", out_dir / "average_successes.png")
-    plot_composition_time_violins(results, steps, task_names, out_dir)
-    print(f"Plots saved to {out_dir}")
-
-
-def plot_metric_by_task(results, steps, task_names, metric, ylabel, path):
-    disable_latex_rendering()
-    ncols = min(3, len(task_names))
-    nrows = math.ceil(len(task_names) / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.5 * nrows), squeeze=False, sharex=True)
-    axes = axes.reshape(-1)
-    for ax, task in zip(axes, task_names):
-        for method in METHODS:
-            values = np.asarray(
-                [results[step].get(task, {}).get(method, {}).get(metric, np.nan) for step in steps],
-                dtype=float,
-            )
-            stds = np.asarray(
-                [results[step].get(task, {}).get(method, {}).get(f"{metric}_std", 0.0) for step in steps],
-                dtype=float,
-            )
-            if not np.isfinite(values).any():
-                continue
-            lower, upper = values - stds, values + stds
-            if metric == "success_rate":
-                lower, upper = np.clip(lower, 0, 1), np.clip(upper, 0, 1)
-            ax.plot(
-                steps,
-                values,
-                "o-",
-                color=COLORS[method],
-                linewidth=2,
-                markersize=6,
-                label=METHOD_LABELS[method],
-            )
-            ax.fill_between(steps, lower, upper, color=COLORS[method], alpha=0.2, linewidth=0)
-        ax.set_title(TASK_LABELS.get(task, task), fontsize=TITLE_FONTSIZE)
-        ax.set_xscale("log")
-        ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
-        ax.grid(alpha=0.25)
-    for ax in axes[len(task_names):]:
-        ax.axis("off")
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=len(labels), fontsize=LEGEND_FONTSIZE)
-    fig.supxlabel("Training iterations per extended value function", fontsize=LABEL_FONTSIZE)
-    fig.supylabel(ylabel, fontsize=LABEL_FONTSIZE)
-    fig.tight_layout(rect=(0.02, 0.02, 1, 0.92))
-    fig.savefig(path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def plot_metric_average(results, steps, task_names, metric, ylabel, path):
-    disable_latex_rendering()
-    fig, ax = plt.subplots(figsize=(6, 4))
-    for method in METHODS:
-        means, spreads = [], []
-        for step in steps:
-            values = np.asarray(
-                [
-                    results[step].get(task, {}).get(method, {}).get(metric, np.nan)
-                    for task in task_names
-                ],
-                dtype=float,
-            )
-            values = values[np.isfinite(values)]
-            if len(values):
-                means.append(float(np.mean(values)))
-                spreads.append(float(np.std(values)))
-            else:
-                means.append(np.nan)
-                spreads.append(0.0)
-        means = np.asarray(means)
-        spreads = np.asarray(spreads)
-        lower, upper = means - spreads, means + spreads
-        if metric == "success_rate":
-            lower, upper = np.clip(lower, 0, 1), np.clip(upper, 0, 1)
-        ax.plot(
-            steps,
-            means,
-            "o-",
-            color=COLORS[method],
-            linewidth=2,
-            markersize=6,
-            label=METHOD_LABELS[method],
-        )
-        ax.fill_between(steps, lower, upper, color=COLORS[method], alpha=0.2, linewidth=0)
-    ax.set_xscale("log")
-    ax.set_xlabel("Training iterations per extended value function", fontsize=LABEL_FONTSIZE)
-    ax.set_ylabel(ylabel, fontsize=LABEL_FONTSIZE)
-    ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
-    ax.grid(alpha=0.25)
-    ax.legend(fontsize=LEGEND_FONTSIZE)
-    fig.tight_layout()
-    fig.savefig(path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def print_composition_time_stats(rows):
-    if not rows:
-        return
-
-    headers = ("Task", "Step", "Method", "N", "Mean", "Std", "Median", "Q1", "Q3", "Min", "Max")
-    table = [headers]
-    for task, step, method, values in rows:
-        table.append(
-            (
-                TASK_LABELS.get(task, task),
-                str(step),
-                METHOD_LABELS[method],
-                str(len(values)),
-                f"{np.mean(values):.3f}",
-                f"{np.std(values):.3f}",
-                f"{np.median(values):.3f}",
-                f"{np.percentile(values, 25):.3f}",
-                f"{np.percentile(values, 75):.3f}",
-                f"{np.min(values):.3f}",
-                f"{np.max(values):.3f}",
-            )
-        )
-
-    widths = [max(len(row[idx]) for row in table) for idx in range(len(headers))]
-    print("\nComposition time violin statistics (ms)")
-    print(" | ".join(value.ljust(widths[idx]) for idx, value in enumerate(table[0])))
-    print("-+-".join("-" * width for width in widths))
-    for row in table[1:]:
-        print(" | ".join(value.rjust(widths[idx]) for idx, value in enumerate(row)))
-
-
-def plot_composition_time_violins(results, steps, task_names, out_dir):
-    has_values = any(
-        results[step][task][method].get("composition_times")
-        for step in steps
-        for task in task_names
-        for method in COMPOSITION_TIME_METHODS
-        if task in results[step] and method in results[step][task]
-    )
-    if not has_values:
-        return
-
-    ncols = min(3, len(task_names))
-    nrows = math.ceil(len(task_names) / ncols)
-    fig, axes = plt.subplots(
-        nrows,
-        ncols,
-        figsize=(5.0 * ncols, 3.8 * nrows),
-        sharex=True,
-        squeeze=False,
-    )
-    axes = axes.reshape(-1)
-    offsets = np.linspace(-0.18, 0.18, len(COMPOSITION_TIME_METHODS))
-    base_positions = np.arange(len(steps))
-    stats_rows = []
-
-    for ax, task in zip(axes, task_names):
-        for offset, method in zip(offsets, COMPOSITION_TIME_METHODS):
-            samples = []
-            positions = []
-            for idx, step in enumerate(steps):
-                if task not in results[step] or method not in results[step][task]:
-                    continue
-                values = np.asarray(
-                    results[step][task][method].get("composition_times", []),
-                    dtype=float,
-                )
-                values = values[np.isfinite(values)] * 1000.0
-                if len(values):
-                    samples.append(values)
-                    positions.append(base_positions[idx] + offset)
-                    stats_rows.append((task, step, method, values))
-            if not samples:
-                continue
-            violins = ax.violinplot(
-                samples,
-                positions=positions,
-                widths=0.28,
-                showmeans=True,
-                showextrema=False,
-            )
-            for body in violins["bodies"]:
-                body.set_facecolor(COLORS[method])
-                body.set_edgecolor(COLORS[method])
-                body.set_alpha(0.35)
-            violins["cmeans"].set_color(COLORS[method])
-            violins["cmeans"].set_linewidth(2)
-
-        ax.set_title(TASK_LABELS.get(task, task), fontsize=TITLE_FONTSIZE)
-        ax.set_xticks(base_positions)
-        ax.set_xticklabels([str(step) for step in steps], rotation=30, ha="right")
-        ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
-        ax.grid(alpha=0.25)
-
-    for ax in axes[len(task_names):]:
-        ax.axis("off")
-
-    print_composition_time_stats(stats_rows)
-
-    handles = [
-        Patch(facecolor=COLORS[method], edgecolor=COLORS[method], alpha=0.35, label=METHOD_LABELS[method])
-        for method in COMPOSITION_TIME_METHODS
-    ]
-    fig.legend(handles=handles, loc="upper center", ncol=len(handles), fontsize=LEGEND_FONTSIZE)
-    fig.supxlabel("Training iterations per extended value function", fontsize=LABEL_FONTSIZE)
-    fig.supylabel("Composition time per action (ms)", fontsize=LABEL_FONTSIZE)
-    fig.tight_layout(rect=(0.02, 0.02, 1, 0.92))
-    fig.savefig(out_dir / "composition_time_violins.png", bbox_inches="tight", dpi=200)
-    fig.savefig(out_dir / "composition_time_violins.pdf", bbox_inches="tight")
-    plt.close(fig)
-
-
 def plot_only(args):
     with open(args.output, "rb") as f:
         results = pickle.load(f)
@@ -780,6 +541,16 @@ def build_parser():
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--run", type=int, default=None)
     parser.add_argument("--train-primitive", default=None)
+    parser.add_argument(
+        "--training-output",
+        choices=("shards", "single"),
+        default="shards",
+        help=(
+            "Checkpoint layout for training/evaluation: 'shards' for parallel "
+            "per-WVF jobs with goals_<primitive> files, or 'single' for one "
+            "sequential job with a shared goals file."
+        ),
+    )
     parser.add_argument("--algo", choices=("td3", "dqn"), default="td3")
     parser.add_argument("--tasks", default="task1,task2,task3,task4,task5,task6")
     parser.add_argument("--eval_episodes", type=int, default=100)

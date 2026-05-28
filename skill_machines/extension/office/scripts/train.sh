@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --partition=gpu_h100
-#SBATCH --gpus=1
+#SBATCH --gpus=9
 #SBATCH --job-name=train
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9

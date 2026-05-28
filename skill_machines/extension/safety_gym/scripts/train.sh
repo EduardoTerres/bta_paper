@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --partition=gpu_h100
-#SBATCH --gpus=1
+#SBATCH --gpus=9
 #SBATCH --job-name=safety-train
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
@@ -44,6 +44,8 @@ export LDFLAGS="-L/usr/lib64 -L${CONDA_PREFIX}/lib ${LDFLAGS:-}"
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:$MUJOCO_PY_MUJOCO_PATH/bin:$PROJECT_MUJOCO_COMPAT:${CONDA_PREFIX}/lib:/usr/lib64"
 export MUJOCO_PY_FORCE_CPU="${MUJOCO_PY_FORCE_CPU:-1}"
 
+# Parallel shard layout: each SLURM task trains one WVF for one run and writes
+# wvf_<primitive>.zip plus goals_<primitive>. Evaluation reassembles these shards.
 num_runs=3
 primitives=(0 1 p_buttons p_goal p_hazards c_hazards)
 num_primitives=${#primitives[@]}
@@ -58,6 +60,7 @@ fi
 python -u skill_machines/extension/safety_gym/exp_convergence.py \
   --run "$run" \
   --train-primitive "$primitive" \
+  --training-output shards \
   --runs "$num_runs" \
   --maxiters 10000,20000,30000,40000,50000,60000,70000,80000,90000,100000,150000,200000,300000,400000,500000,600000,700000,800000,900000,1000000 \
   --runs_dir "$SAFETY_GYM_DATA_DIR/runs" \
