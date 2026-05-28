@@ -331,6 +331,52 @@ class SkillPrimitive(BaseAgent):
             values = np.where(mask, max_values, min_values)
         return actions, values
 
+    def get_action_goal_qvalues(self, states):
+        if not self.is_discrete:
+            return None
+        if self.primitive in self.wvfs:
+            return self.get_agent_qvalues(self.wvfs[self.primitive], states)
+
+        goal_prop = states["desired_goal"][
+            :, -2 * len(self.predicates) : -len(self.predicates)
+        ]
+        goal_cons = states["desired_goal"][:, -len(self.predicates) :]
+        idx = self.predicates.index(self.primitive[2:])
+        if self.primitive[0] == "p":
+            mask = goal_prop[:, idx] == 1
+        else:
+            mask = goal_cons[:, idx] == 1
+
+        max_qvalues = self.get_agent_qvalues(self.wvfs["1"], states)
+        min_qvalues = self.get_agent_qvalues(self.wvfs["0"], states)
+        if max_qvalues is None or min_qvalues is None:
+            return None
+        return np.where(mask[:, np.newaxis], max_qvalues, min_qvalues)
+
+    def get_agent_qvalues(self, agent, states):
+        if hasattr(agent, "get_values"):
+            qvalues = []
+            for idx in range(states["env_state"].shape[0]):
+                state = {key: value[idx] for key, value in states.items()}
+                qvalues.append(agent.get_values(state))
+            return np.array(qvalues)
+
+        if hasattr(agent, "model") and hasattr(agent.model, "q_net"):
+            import torch
+
+            obs = states.copy()
+            for key, obs_ in obs.items():
+                obs[key] = torch.as_tensor(obs_, device=agent.model.device)
+                if len(obs[key].shape) > 2:
+                    obs[key] = obs[key].permute(0, 3, 1, 2)
+            with torch.no_grad():
+                qvalues = agent.model.q_net(obs)
+            if qvalues.device != torch.device("cpu"):
+                qvalues = qvalues.cpu()
+            return qvalues.numpy()
+
+        return None
+
 
 class ComposeSkillPrimitive(SkillPrimitive):
     def __init__(self, skill_primitives, compose="or"):
@@ -370,14 +416,30 @@ class ComposeSkillPrimitive(SkillPrimitive):
             min_actions, min_values = (
                 self.skill_primitives[0].wvfs["0"].get_action_value(states)
             )
-            values = (max_values + min_values) - values
             if self.is_discrete:
-                actions = np.where(
-                    (abs(values - max_values) < abs(values - min_values)),
-                    max_actions,
-                    min_actions,
+                qvalues = self.skill_primitives[0].get_action_goal_qvalues(states)
+                max_qvalues = self.skill_primitives[0].get_agent_qvalues(
+                    self.skill_primitives[0].wvfs["1"], states
                 )
+                min_qvalues = self.skill_primitives[0].get_agent_qvalues(
+                    self.skill_primitives[0].wvfs["0"], states
+                )
+                if (
+                    qvalues is not None
+                    and max_qvalues is not None
+                    and min_qvalues is not None
+                ):
+                    qvalues = (max_qvalues + min_qvalues) - qvalues
+                    actions, values = qvalues.argmax(axis=1), qvalues.max(axis=1)
+                else:
+                    values = (max_values + min_values) - values
+                    actions = np.where(
+                        (abs(values - max_values) < abs(values - min_values)),
+                        max_actions,
+                        min_actions,
+                    )
             else:
+                values = (max_values + min_values) - values
                 actions = np.where(
                     (abs(values - max_values) < abs(values - min_values))[
                         :, np.newaxis
@@ -418,7 +480,12 @@ class GoalSetSkillPrimitive(SkillPrimitive):
         states = states.copy()
         if desired_goal is not None:
             states["desired_goal"] = np.expand_dims(desired_goal, axis=0)
-            return self.get_action_goal_values(states)
+            wvf = (
+                self.wvfs["1"]
+                if goal_satisfies_exp(self.primitive, desired_goal, self.predicates)
+                else self.wvfs["0"]
+            )
+            return wvf.get_action_value(states)
 
         goals = np.array(list(self.goals.values()))
         satisfies = np.array(

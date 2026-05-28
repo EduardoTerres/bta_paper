@@ -12,7 +12,9 @@ from matplotlib.colors import LinearSegmentedColormap
 
 METHODS = ["onoff", "boolean"]
 METHOD_LABELS = [r"Univ./Empty (Ours)", r"Base Tasks"]
-COLORS = plt.cm.tab10.colors[:2]
+COLORS = ["#1A5276", "#C0560A"]
+CONVERGENCE_MARKER = "^-"
+CONVERGENCE_MARKER_SIZE = 8
 TASK_LABELS = {
     "B": "Blue",
     "S": "Square",
@@ -33,14 +35,13 @@ def plot_convergence(returns_per_steps, figure_path):
     fig, ax = plt.subplots(figsize=(8, 6))
     for idx, method in enumerate(METHODS):
         means, stds = _mean_std_by_step(returns_per_steps, steps, method)
-        ax.plot(steps, means, "o-", color=COLORS[idx], linewidth=2, markersize=6, label=method)
+        ax.plot(steps, means, CONVERGENCE_MARKER, color=COLORS[idx], linewidth=2, markersize=CONVERGENCE_MARKER_SIZE, label=method)
         ax.fill_between(steps, means - stds, means + stds, color=COLORS[idx], alpha=0.2)
-    _format_axis(ax, with_xlabel=True, with_ylabel=True)
+    _format_axis(ax, with_ylabel=True)
     handles, _ = ax.get_legend_handles_labels()
     ax.legend(handles=handles, labels=METHOD_LABELS, fontsize=20)
     plt.tight_layout()
-    figure_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(figure_path), bbox_inches="tight")
+    _save_figure(fig, figure_path)
     plt.close(fig)
 
 
@@ -61,7 +62,7 @@ def plot_convergence_by_task(returns_per_steps, figure_path):
                 method,
                 task_name=task_name,
             )
-            ax.plot(steps, means, "o-", color=COLORS[idx], linewidth=2, markersize=6, label=method)
+            ax.plot(steps, means, CONVERGENCE_MARKER, color=COLORS[idx], linewidth=2, markersize=CONVERGENCE_MARKER_SIZE, label=method)
             ax.fill_between(steps, means - stds, means + stds, color=COLORS[idx], alpha=0.2)
         ax.set_title(TASK_LABELS.get(task_name, task_name), fontsize=20)
         _format_axis(ax)
@@ -72,8 +73,7 @@ def plot_convergence_by_task(returns_per_steps, figure_path):
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, METHOD_LABELS, loc="upper center", ncol=len(METHODS), fontsize=20)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
-    figure_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(figure_path), bbox_inches="tight")
+    _save_figure(fig, figure_path)
     plt.close(fig)
 
 
@@ -95,13 +95,12 @@ def plot_fair_convergence(returns_per_steps, figure_path):
         (boolean_means, boolean_stds, COLORS[1], METHOD_LABELS[1]),
     )
     for means, stds, color, label in series:
-        ax.plot(steps, means, "o-", color=color, linewidth=2, markersize=6, label=label)
+        ax.plot(steps, means, CONVERGENCE_MARKER, color=color, linewidth=2, markersize=CONVERGENCE_MARKER_SIZE, label=label)
         ax.fill_between(steps, means - stds, means + stds, color=color, alpha=0.2)
-    _format_axis(ax, with_xlabel=True, with_ylabel=True)
+    _format_axis(ax, with_ylabel=True)
     ax.legend(fontsize=20)
     plt.tight_layout()
-    figure_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(figure_path), bbox_inches="tight")
+    _save_figure(fig, figure_path)
     plt.close(fig)
 
 
@@ -148,8 +147,7 @@ def plot_value_progression(step_maps, policy_maps, map_image, figure_path, title
         cax = fig.add_axes([0.955, bbox.y0, 0.018, bbox.height])
         fig.colorbar(last_mesh, cax=cax)
         cax.tick_params(labelsize=12)
-    figure_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(figure_path), bbox_inches="tight", dpi=200)
+    _save_figure(fig, figure_path, dpi=200)
     plt.close(fig)
 
 
@@ -178,8 +176,7 @@ def plot_value_map(value_map, policy_map, map_image, figure_path):
     cax = fig.add_axes([0.94, bbox.y0, 0.035, bbox.height])
     fig.colorbar(mesh, cax=cax)
     cax.tick_params(labelsize=12)
-    figure_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(figure_path), bbox_inches="tight", dpi=200)
+    _save_figure(fig, figure_path, dpi=200)
     plt.close(fig)
 
 
@@ -189,6 +186,15 @@ def fair_figure_path(figure_path):
 
 def by_task_figure_path(figure_path):
     return figure_path.with_name(f"{figure_path.stem}_by_task{figure_path.suffix}")
+
+
+def _save_figure(fig, figure_path, dpi=None):
+    figure_path.parent.mkdir(parents=True, exist_ok=True)
+    save_kwargs = {"bbox_inches": "tight"}
+    if dpi is not None:
+        save_kwargs["dpi"] = dpi
+    for suffix in (".png", ".pdf"):
+        fig.savefig(str(figure_path.with_suffix(suffix)), **save_kwargs)
 
 
 def fair_step_pairs(returns_per_steps):
