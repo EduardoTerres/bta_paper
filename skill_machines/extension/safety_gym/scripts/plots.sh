@@ -46,7 +46,7 @@ python skill_machines/extension/safety_gym/exp_convergence.py \
   --plot_only \
   --training-output shards \
   --runs 3 \
-  --maxiters 50000,100000,200000,400000,700000,1000000,1500000,2000000,2500000,3000000,3500000,4000000 \
+  --maxiters 10000,100000,150000,300000,400000,700000,1000000,1500000,2000000 \
   --runs_dir "$SAFETY_GYM_DATA_DIR/runs" \
   --output "$SAFETY_GYM_DATA_DIR/sm_convergence.pkl" \
   --figures_dir "$PWD/skill_machines/extension/safety_gym/exps_data_extension/figures"

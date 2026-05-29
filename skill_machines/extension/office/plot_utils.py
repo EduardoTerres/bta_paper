@@ -18,9 +18,9 @@ plt.rcParams.update(PLOT_RC)
 
 METHODS = ("original", "minmax", "boolean")
 METHOD_LABELS = {
-    "original": r"Original",
+    "original": r"Original SM",
     "minmax": r"Univ./empty (Ours)",
-    "boolean": r"Base tasks",
+    "boolean": r"Base tasks BTA",
 }
 COMPOSITION_TIME_METHODS = METHODS
 COLORS = {

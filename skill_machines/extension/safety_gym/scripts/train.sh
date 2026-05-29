@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --partition=gpu_h100
-#SBATCH --gpus=3
+#SBATCH --gpus=2
 #SBATCH --job-name=safety-train
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=16:00:00
-#SBATCH --array=0-17
+#SBATCH --time=24:00:00
+#SBATCH --array=0-11
 #SBATCH --output=safety_train_%A_%a.out
 
 set -euo pipefail
@@ -46,7 +46,7 @@ export MUJOCO_PY_FORCE_CPU="${MUJOCO_PY_FORCE_CPU:-1}"
 
 # Parallel shard layout: each SLURM task trains one WVF for one run and writes
 # wvf_<primitive>.zip plus goals_<primitive>. Evaluation reassembles these shards.
-num_runs=3
+num_runs=2
 primitives=(0 1 p_buttons p_goal p_hazards c_hazards)
 num_primitives=${#primitives[@]}
 run=$((SLURM_ARRAY_TASK_ID / num_primitives))

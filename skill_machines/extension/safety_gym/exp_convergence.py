@@ -477,6 +477,65 @@ def evaluate_once(task_env, sm, method, args, seed):
     return metrics
 
 
+def desired_goal_for_primitive(primitive_env, primitive):
+    goal = primitive_env.goal_space.low.copy()
+    if primitive.startswith("p_"):
+        goal[primitive_env.predicates.index(primitive[2:])] = 1
+    elif primitive.startswith("c_"):
+        goal[len(primitive_env.predicates) + primitive_env.predicates.index(primitive[2:])] = 1
+    return goal
+
+
+def base_task_state(primitive_env, state, desired_goal):
+    env_states = np.expand_dims(state["env_state"], 0)
+    violated_constraints = state.get("violated_constraints", primitive_env.proposition_space.low)
+    return {
+        "env_state": env_states,
+        "violated_constraints": np.expand_dims(violated_constraints, 0),
+        "achieved_goal": np.expand_dims(primitive_env.goal_space.low, 0),
+        "desired_goal": np.expand_dims(desired_goal, 0),
+    }
+
+
+def evaluate_base_task_times(primitive_env, agents, task_env, args, seed):
+    primitives = [primitive for primitive in COMPOSITION_TIME_METHODS if primitive in agents]
+    desired_goals = {
+        primitive: desired_goal_for_primitive(primitive_env, primitive)
+        for primitive in primitives
+    }
+    composition_times = {primitive: [] for primitive in primitives}
+
+    for episode in range(args.eval_episodes):
+        episode_seed = None if seed is None else seed + episode
+        state, _ = task_env.reset(seed=episode_seed)
+        for _ in range(args.eval_steps):
+            rollout_action = None
+            for primitive in primitives:
+                states = base_task_state(primitive_env, state, desired_goals[primitive])
+                composition_start = time.perf_counter()
+                action = agents[primitive].get_action_value(states)[0]
+                composition_times[primitive].append(time.perf_counter() - composition_start)
+                if primitive == "1":
+                    actions = np.asarray(action)
+                    rollout_action = actions[0] if actions.ndim > 1 else actions
+            if rollout_action is None:
+                break
+            state, _, done, truncated, _ = task_env.step(rollout_action)
+            if done or truncated:
+                break
+
+    metrics_by_primitive = {}
+    for primitive, times in composition_times.items():
+        if not times:
+            continue
+        metrics_by_primitive[primitive] = {
+            "composition_time": float(np.mean(times)),
+            "composition_time_std": float(np.std(times)),
+            "composition_times": times,
+        }
+    return metrics_by_primitive
+
+
 def eval_single(args, run_idx):
     run_results = {}
     for step in tqdm(parse_steps(args.maxiters), desc=f"run_{run_idx:03d}"):
@@ -495,6 +554,15 @@ def eval_single(args, run_idx):
                     seed=None if args.seed is None else args.seed + run_idx * 1000,
                 )
                 run_results[step][task_name][method] = metrics
+            run_results[step][task_name].update(
+                evaluate_base_task_times(
+                    primitive_env,
+                    agents,
+                    task_env,
+                    args,
+                    seed=None if args.seed is None else args.seed + run_idx * 1000,
+                )
+            )
             task_env.close()
         primitive_env.close()
     return run_results
@@ -531,7 +599,7 @@ def aggregate(run_results):
         task_names = sorted({task for result in run_results for task in result.get(step, {})})
         for task in task_names:
             out[step][task] = {}
-            for method in METHODS:
+            for method in COMPOSITION_TIME_METHODS:
                 metrics = [
                     result[step][task][method]
                     for result in run_results

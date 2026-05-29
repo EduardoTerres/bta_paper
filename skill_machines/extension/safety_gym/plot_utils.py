@@ -6,23 +6,44 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
+from matplotlib import rc
 from matplotlib.patches import Patch
 
-NO_LATEX_RC = {
-    "text.usetex": False,
+PLOT_RC = {
+    "text.usetex": True,
     "text.latex.preamble": "",
 }
+plt.rcParams.update(PLOT_RC)
+
 METHODS = ("original", "minmax", "boolean")
+BASE_TASK_METHODS = ("0", "1", "p_buttons", "p_goal", "p_hazards", "c_buttons", "c_goal", "c_hazards")
 METHOD_LABELS = {
-    "original": "Original",
-    "minmax": "Univ./empty",
-    "boolean": "Base tasks",
+    "original": r"Original SM",
+    "minmax": r"Univ./empty (Ours)",
+    "boolean": r"Base tasks BTA",
+    "0": r"Base task $0$",
+    "1": r"Base task $1$",
+    "p_buttons": r"Base task buttons",
+    "p_goal": r"Base task goal",
+    "p_hazards": r"Base task hazards",
+    "c_buttons": r"Base constraint buttons",
+    "c_goal": r"Base constraint goal",
+    "c_hazards": r"Base constraint hazards",
 }
-COMPOSITION_TIME_METHODS = METHODS
+COMPOSITION_TIME_METHODS = METHODS + BASE_TASK_METHODS
 COLORS = {
     "original": "#C0560A",
     "minmax": "#1A5276",
     "boolean": "#2E7D32",
+    "0": "#7F8C8D",
+    "1": "#34495E",
+    "p_buttons": "#8E44AD",
+    "p_goal": "#D35400",
+    "p_hazards": "#C0392B",
+    "c_buttons": "#9B59B6",
+    "c_goal": "#E67E22",
+    "c_hazards": "#E74C3C",
 }
 TASK_LABELS = {
     "task1": "Task 1",
@@ -36,33 +57,49 @@ TITLE_FONTSIZE = 16
 LABEL_FONTSIZE = 16
 TICK_FONTSIZE = 14
 LEGEND_FONTSIZE = 16
+CONVERGENCE_MARKER = "^-"
+CONVERGENCE_MARKER_SIZE = 8
 
 
-def disable_latex_rendering():
-    matplotlib.rcParams.update(NO_LATEX_RC)
-    plt.rcParams.update(NO_LATEX_RC)
+def _set_style():
+    rc("text", usetex=True)
+    sns.set_context("notebook", font_scale=0.8)
+
+
+def _format_axis(ax, with_xlabel=False, ylabel=None):
+    ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
+    if with_xlabel:
+        ax.set_xlabel("Training iterations per extended value function", fontsize=LABEL_FONTSIZE)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=LABEL_FONTSIZE)
+    ax.set_xscale("log")
 
 
 def plot_results(results, output, figures_dir=None):
-    disable_latex_rendering()
-    out_dir = Path(figures_dir) if figures_dir else Path(output).parent / "figures"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    steps = sorted(key for key in results if isinstance(key, int))
-    task_names = sorted({task for step in steps for task in results[step]})
+    with plt.rc_context(PLOT_RC):
+        _set_style()
+        out_dir = Path(figures_dir) if figures_dir else Path(output).parent / "figures"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        steps = sorted(key for key in results if isinstance(key, int))
+        task_names = sorted({task for step in steps for task in results[step]})
 
-    plot_metric_by_task(results, steps, task_names, "return", "Episode return", out_dir / "returns.png")
-    plot_metric_by_task(results, steps, task_names, "success_rate", "Success rate", out_dir / "successes.png")
-    plot_metric_average(results, steps, task_names, "return", "Episode return", out_dir / "average_returns.png")
-    plot_metric_average(results, steps, task_names, "success_rate", "Success rate", out_dir / "average_successes.png")
-    plot_composition_time_violins(results, steps, task_names, out_dir)
-    print(f"Plots saved to {out_dir}")
+        plot_metric_by_task(results, steps, task_names, "return", "Episode return", out_dir / "returns.png")
+        plot_metric_by_task(results, steps, task_names, "success_rate", "Success rate", out_dir / "successes.png")
+        plot_metric_average(results, steps, task_names, "return", "Episode return", out_dir / "average_returns.png")
+        plot_metric_average(results, steps, task_names, "success_rate", "Success rate", out_dir / "average_successes.png")
+
+        plot_metric_by_task(results, steps, task_names, "return", "Episode return", out_dir / "returns.pdf")
+        plot_metric_by_task(results, steps, task_names, "success_rate", "Success rate", out_dir / "successes.pdf")
+        plot_metric_average(results, steps, task_names, "return", "Episode return", out_dir / "average_returns.pdf")
+        plot_metric_average(results, steps, task_names, "success_rate", "Success rate", out_dir / "average_successes.pdf")
+        plot_composition_time_violins(results, steps, task_names, out_dir)
+        print(f"Plots saved to {out_dir}")
 
 
 def plot_metric_by_task(results, steps, task_names, metric, ylabel, path):
-    disable_latex_rendering()
     ncols = min(3, len(task_names))
     nrows = math.ceil(len(task_names) / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.5 * nrows), squeeze=False, sharex=True)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.0 * ncols, 3.8 * nrows), squeeze=False, sharex=True)
     axes = axes.reshape(-1)
     for ax, task in zip(axes, task_names):
         for method in METHODS:
@@ -82,17 +119,15 @@ def plot_metric_by_task(results, steps, task_names, metric, ylabel, path):
             ax.plot(
                 steps,
                 values,
-                "o-",
+                CONVERGENCE_MARKER,
                 color=COLORS[method],
                 linewidth=2,
-                markersize=6,
+                markersize=CONVERGENCE_MARKER_SIZE,
                 label=METHOD_LABELS[method],
             )
             ax.fill_between(steps, lower, upper, color=COLORS[method], alpha=0.2, linewidth=0)
         ax.set_title(TASK_LABELS.get(task, task), fontsize=TITLE_FONTSIZE)
-        ax.set_xscale("log")
-        ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
-        ax.grid(alpha=0.25)
+        _format_axis(ax)
     for ax in axes[len(task_names):]:
         ax.axis("off")
     handles, labels = axes[0].get_legend_handles_labels()
@@ -105,8 +140,7 @@ def plot_metric_by_task(results, steps, task_names, metric, ylabel, path):
 
 
 def plot_metric_average(results, steps, task_names, metric, ylabel, path):
-    disable_latex_rendering()
-    fig, ax = plt.subplots(figsize=(6, 4))
+    fig, ax = plt.subplots(figsize=(6, 4.5))
     for method in METHODS:
         means, spreads = [], []
         for step in steps:
@@ -132,18 +166,14 @@ def plot_metric_average(results, steps, task_names, metric, ylabel, path):
         ax.plot(
             steps,
             means,
-            "o-",
+            CONVERGENCE_MARKER,
             color=COLORS[method],
             linewidth=2,
-            markersize=6,
+            markersize=CONVERGENCE_MARKER_SIZE,
             label=METHOD_LABELS[method],
         )
         ax.fill_between(steps, lower, upper, color=COLORS[method], alpha=0.2, linewidth=0)
-    ax.set_xscale("log")
-    ax.set_xlabel("Training iterations per extended value function", fontsize=LABEL_FONTSIZE)
-    ax.set_ylabel(ylabel, fontsize=LABEL_FONTSIZE)
-    ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
-    ax.grid(alpha=0.25)
+    _format_axis(ax, with_xlabel=True, ylabel=ylabel)
     ax.legend(fontsize=LEGEND_FONTSIZE)
     fig.tight_layout()
     fig.savefig(path, dpi=200, bbox_inches="tight")
@@ -195,6 +225,7 @@ def plot_composition_time_violins(results, steps, task_names, out_dir):
     base_positions = np.arange(len(task_names))
     offsets = np.linspace(-0.25, 0.25, len(COMPOSITION_TIME_METHODS))
     stats_rows = []
+    plotted_methods = []
 
     for offset, method in zip(offsets, COMPOSITION_TIME_METHODS):
         samples = []
@@ -219,6 +250,7 @@ def plot_composition_time_violins(results, steps, task_names, out_dir):
                 stats_rows.append((task, method, task_values))
         if not samples:
             continue
+        plotted_methods.append(method)
         violins = ax.violinplot(
             samples,
             positions=positions,
@@ -237,7 +269,7 @@ def plot_composition_time_violins(results, steps, task_names, out_dir):
 
     handles = [
         Patch(facecolor=COLORS[method], edgecolor=COLORS[method], alpha=0.35, label=METHOD_LABELS[method])
-        for method in COMPOSITION_TIME_METHODS
+        for method in plotted_methods
     ]
     ax.legend(handles=handles, fontsize=LEGEND_FONTSIZE)
     ax.set_xticks(base_positions)

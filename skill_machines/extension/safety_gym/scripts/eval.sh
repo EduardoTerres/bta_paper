@@ -51,7 +51,7 @@ python skill_machines/extension/safety_gym/exp_convergence.py \
   --training-output shards \
   --runs 2 \
   --run "$SLURM_ARRAY_TASK_ID" \
-  --eval_episodes 50 \
+  --eval_episodes 500 \
   --maxiters 10000,100000,150000,300000,400000,700000,1000000,1500000,2000000 \
   --runs_dir "$SAFETY_GYM_DATA_DIR/runs" \
   --log_dir "$SAFETY_GYM_DATA_DIR/logs" \

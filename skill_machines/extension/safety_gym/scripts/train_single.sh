@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=48:00:00
-#SBATCH --array=0-2
+#SBATCH --array=0-1
 #SBATCH --output=safety_train_single_%A_%a.out
 
 set -euo pipefail
@@ -44,7 +44,7 @@ export LDFLAGS="-L/usr/lib64 -L${CONDA_PREFIX}/lib ${LDFLAGS:-}"
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:$MUJOCO_PY_MUJOCO_PATH/bin:$PROJECT_MUJOCO_COMPAT:${CONDA_PREFIX}/lib:/usr/lib64"
 export MUJOCO_PY_FORCE_CPU="${MUJOCO_PY_FORCE_CPU:-1}"
 
-num_runs=3
+num_runs=2
 run="${SLURM_ARRAY_TASK_ID}"
 
 if (( run >= num_runs )); then
@@ -57,7 +57,7 @@ python -u skill_machines/extension/safety_gym/exp_convergence.py \
   --training-output single \
   --resume-training \
   --runs "$num_runs" \
-  --maxiters 1000000,1200000,1400000,1600000,1800000,2000000 \
+  --maxiters 50000,100000,200000,400000,700000,1000000,1500000,2000000,2500000,3000000,3500000,4000000 \
   --runs_dir "$SAFETY_GYM_DATA_DIR/runs" \
   --log_dir "$SAFETY_GYM_DATA_DIR/logs" \
   --wandb
