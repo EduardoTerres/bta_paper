@@ -14,6 +14,7 @@ use_cuda = torch.cuda.is_available()
 FloatTensor = torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
 LongTensor = torch.cuda.LongTensor if use_cuda else torch.LongTensor
 ByteTensor = torch.cuda.ByteTensor if use_cuda else torch.ByteTensor
+GOALS_PATH = os.path.join(os.path.dirname(__file__), "goals.h5")
 
 
 class LinearSchedule(object):
@@ -43,8 +44,8 @@ class ReplayBuffer(object):
         self.N = N
         self.goals = []
         self.goals_hash = []
-        if os.path.exists('./goals.h5'):
-            self.goals = dd.io.load('./goals.h5')
+        if os.path.exists(GOALS_PATH):
+            self.goals = dd.io.load(GOALS_PATH)
             for goal in self.goals:
                 self.goals_hash.append(goal.sum())
 
@@ -91,6 +92,8 @@ class ReplayBuffer(object):
         """
         obses_goal_t, actions, rewards, obses_goal_tp1, dones = [], [], [], [], []
         lg = len(self.goals)
+        if lg == 0:
+            raise ValueError(f"ReplayBuffer could not load goals from {GOALS_PATH}")
         ng = np.arange(lg)
         np.random.shuffle(ng)  
         mbs = int(batch_size/lg)
@@ -179,25 +182,45 @@ class ComposedDQN(nn.Module):
 
 
 class ComposedDQN_onoff(nn.Module):
-    def __init__(self, dqns, compose="or", rmax=2, rmin=-0.1):
-        super(ComposedDQN, self).__init__()
-        self.compose = compose
-        self.dqns = dqns
-        self.rmax = rmax
-        self.rmin = rmin
-        self.dqn_max = MaxDQN(dqns[0], self.rmax)
+    def __init__(self, dqn_on, dqn_off=None, on_goals=None, atol=0):
+        super(ComposedDQN_onoff, self).__init__()
+        if dqn_off is None:
+            if len(dqn_on) != 2:
+                raise ValueError("ComposedDQN_onoff expects on/off DQNs.")
+            dqn_on, dqn_off = dqn_on
+
+        self.dqn_on = dqn_on
+        self.dqn_off = dqn_off
+        self.atol = atol
+        self.register_buffer("_on_goals", self._prepare_goals(on_goals), persistent=False)
+
+    def _prepare_goals(self, goals):
+        if goals is None or len(goals) == 0:
+            return torch.empty(0)
+
+        goal_tensors = []
+        for goal in goals:
+            goal_tensors.append(torch.as_tensor(goal).detach().clone())
+        return torch.stack(goal_tensors, 0).to(dtype=torch.float32)
+
+    def _on_goal_mask(self, obs_goal):
+        if self._on_goals.numel() == 0:
+            return torch.zeros(obs_goal.shape[0], dtype=torch.bool, device=obs_goal.device)
+
+        goals = obs_goal[:, :, :, 3:].detach()
+        on_goals = self._on_goals.to(device=obs_goal.device, dtype=goals.dtype)
+        matches = torch.isclose(goals[:, None], on_goals[None], atol=self.atol)
+        return matches.flatten(2).all(2).any(1)
     
     def forward(self, obs_goal):
-        qs = [self.dqns[i](obs_goal) for i in range(len(self.dqns))]
-        qs = torch.stack(tuple(qs), 0)
-        if self.compose=="or":
-            q = qs.max(0)[0]
-        elif self.compose=="and":
-            q = qs.min(0)[0]
-        else: #not
-            q_max = self.dqn_max(obs_goal)
-            q_min = q_max - (self.rmax-self.rmin)
-            q = (q_max+q_min)-qs[0]
+        q_on = self.dqn_on(obs_goal)
+        q_off = self.dqn_off(obs_goal)
+        mask = self._on_goal_mask(obs_goal)
+        if q_on.dim() == 1:
+            mask = mask[0]
+        else:
+            mask = mask.view(-1, *([1] * (q_on.dim() - 1)))
+        q = torch.where(mask, q_on, q_off)
 
         return q.detach().clone()
 
@@ -234,7 +257,9 @@ class Agent(object):
                  eps_final=0.01,
                  eps_timesteps=1000000,
                  print_freq=10,
-                 path=None):
+                 path=None,
+                 train_log_callback=None,
+                 checkpoint_callback=None):
         assert type(env.observation_space) == gym.spaces.Box
         assert type(env.action_space) == gym.spaces.Discrete
 
@@ -247,6 +272,8 @@ class Agent(object):
         self.gamma = gamma
         self.print_freq = print_freq
         self.path = path
+        self.train_log_callback = train_log_callback
+        self.checkpoint_callback = checkpoint_callback
 
         self.eps_schedule = LinearSchedule(eps_timesteps, eps_final, eps_initial)
 
@@ -259,7 +286,10 @@ class Agent(object):
             self.target_q_func.cuda()
 
         self.optimizer = optim.Adam(self.q_func.parameters(), lr=learning_rate)
-        self.replay_buffer = ReplayBuffer(replay_buffer_size, N=(env.rmin-env.rmax)*env.diameter)
+        self.replay_buffer = ReplayBuffer(
+            replay_buffer_size,
+            N=(env.rmin-env.rmax)*env.diameter,
+        )
         self.steps = 0
 
     def select_action(self, obs):
@@ -285,6 +315,13 @@ class Agent(object):
         obs = self.env.reset()
         episode_rewards = [0.0]
 
+        def log_training(t, **metrics):
+            if self.train_log_callback:
+                self.train_log_callback(t, metrics)
+
+        def mean_recent_rewards(rewards):
+            return float(np.mean(rewards if rewards else episode_rewards[-1:]))
+
         for t in range(self.max_timesteps):
             action = self.select_action(obs)
             new_obs, reward, done, info = self.env.step(int(action[0][0]))
@@ -293,6 +330,12 @@ class Agent(object):
 
             episode_rewards[-1] += reward
             if done:
+                log_training(
+                    t,
+                    episode_reward=float(episode_rewards[-1]),
+                    episode=len(episode_rewards),
+                    mean_100ep_reward=mean_recent_rewards(episode_rewards[-100:]),
+                )
                 obs = self.env.reset()
                 episode_rewards.append(0.0)
 
@@ -321,6 +364,15 @@ class Agent(object):
                     params.grad.data.clamp_(-1, 1)
                 self.optimizer.step()
 
+                if t % self.target_update_freq == 0:
+                    log_training(
+                        t,
+                        loss=float(loss.item()),
+                        epsilon=float(self.eps_schedule(t)),
+                        episodes=len(episode_rewards),
+                        mean_100ep_reward=mean_recent_rewards(episode_rewards[-101:-1]),
+                    )
+
             # Periodically update the target network by Q network to target Q network
             if t > self.learning_starts and t % self.target_update_freq == 0:
                 self.target_q_func.load_state_dict(self.q_func.state_dict())
@@ -338,3 +390,6 @@ class Agent(object):
                 print("mean 100 episode reward {}".format(mean_100ep_reward))
                 print("% time spent exploring {}".format(int(100 * self.eps_schedule(t))))
                 print("--------------------------------------------------------")
+
+            if self.checkpoint_callback:
+                self.checkpoint_callback(self, t + 1)
