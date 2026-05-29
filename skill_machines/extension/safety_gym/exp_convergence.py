@@ -275,6 +275,19 @@ def make_agent(algo, name, env, save_dir, log_dir, load=False):
     raise ValueError(f"Unknown algo: {algo}")
 
 
+def find_resume_checkpoint(run_dir, primitive):
+    candidates = []
+    for step_dir in Path(run_dir).iterdir() if Path(run_dir).exists() else []:
+        if not step_dir.is_dir() or not step_dir.name.isdigit():
+            continue
+        model_path = step_dir / f"wvf_{primitive}.zip"
+        single_goals = step_dir / "goals"
+        shard_goals = step_dir / f"goals_{primitive}"
+        if model_path.exists() and (single_goals.exists() or shard_goals.exists()):
+            candidates.append((int(step_dir.name), step_dir, shard_goals if shard_goals.exists() else single_goals))
+    return max(candidates, default=None, key=lambda item: item[0])
+
+
 def train_run(args):
     steps = parse_steps(args.maxiters)
     set_seed(None if args.seed is None else args.seed + args.run)
@@ -299,20 +312,38 @@ def train_run(args):
             primitive_env.primitive = primitive
             primitive_log_dir = this_log_dir / f"wvf_{primitive}"
             primitive_log_dir.mkdir(parents=True, exist_ok=True)
+            resume = find_resume_checkpoint(this_run_dir, primitive) if args.resume_training else None
+            if args.resume_training and not resume:
+                raise FileNotFoundError(
+                    f"--resume-training set, but no checkpoint found for run_{args.run:03d}/wvf_{primitive}"
+                )
+            resume_step = resume[0] if resume else 0
+            pending_steps = [step for step in steps if step > resume_step]
+            if resume and resume_step >= max(steps):
+                print(f"[resume] run_{args.run:03d}/wvf_{primitive} already at {resume_step}; skipping")
+                continue
             existing = [
                 (checkpoint_dir(this_run_dir, step) / f"wvf_{primitive}.zip").exists()
-                for step in steps
+                for step in pending_steps
             ]
             if any(existing):
-                existing_steps = [step for step, exists in zip(steps, existing) if exists]
+                existing_steps = [step for step, exists in zip(pending_steps, existing) if exists]
                 print(
                     f"[warning] run_{args.run:03d}/wvf_{primitive} already has "
                     f"{len(existing_steps)} checkpoint(s); training will overwrite them."
                 )
-            agent = make_agent(args.algo, f"wvf_{primitive}", primitive_env, this_run_dir, primitive_log_dir)
-            print(f"[train] run_{args.run:03d}/wvf_{primitive} to {max(steps)} steps")
+            save_dir = this_run_dir
+            load = False
+            if resume:
+                _, step_dir, goals_path = resume
+                primitive_env.goals.update(torch.load(goals_path, map_location="cpu"))
+                save_dir = step_dir
+                load = True
+                print(f"[resume] run_{args.run:03d}/wvf_{primitive} from {resume_step} ({goals_path.name})")
+            agent = make_agent(args.algo, f"wvf_{primitive}", primitive_env, save_dir, primitive_log_dir, load=load)
+            print(f"[train] run_{args.run:03d}/wvf_{primitive} {resume_step}->{max(steps)} steps")
             agent.model.learn(
-                max(steps),
+                max(steps) - resume_step,
                 callback=[
                     WandbSB3Callback(
                         wandb_run,
@@ -323,11 +354,11 @@ def train_run(args):
                         primitive_env,
                         this_run_dir,
                         primitive,
-                        steps,
+                        pending_steps,
                         args.training_output,
                     ),
                 ],
-                reset_num_timesteps=True,
+                reset_num_timesteps=not resume,
             )
         print(f"Finished run_{args.run:03d}")
     finally:
@@ -413,7 +444,8 @@ def evaluate_once(task_env, sm, method, args, seed):
         for step in range(args.eval_steps):
             states = {key: np.expand_dims(value, 0) for key, value in state.items()}
             composition_start = time.perf_counter()
-            action = sm.get_action_value(states)[0][0]
+            actions = np.asarray(sm.get_action_value(states)[0])
+            action = actions[0] if actions.ndim > 1 else actions
             if method in COMPOSITION_TIME_METHODS:
                 composition_times.append(time.perf_counter() - composition_start)
             state, reward, done, truncated, info = task_env.step(action)
@@ -510,8 +542,36 @@ def aggregate(run_results):
     return out
 
 
+def filter_results_steps(results, requested_steps):
+    steps = [step for step in requested_steps if step in results]
+    missing = [step for step in requested_steps if step not in results]
+    if missing:
+        print("Skipping training steps not found in results: " + ", ".join(str(step) for step in missing))
+    if not steps:
+        available = sorted(key for key in results if isinstance(key, int))
+        raise ValueError(
+            "None of the requested --maxiters are present in results. "
+            "Available training steps: " + ", ".join(str(step) for step in available)
+        )
+    return {step: results[step] for step in steps}
+
+
+def load_available_run_results(args):
+    run_results = []
+    run_paths = []
+    for run_idx in range(args.runs):
+        run_output = run_dir(args, run_idx) / "sm_convergence.pkl"
+        if run_output.exists():
+            with open(run_output, "rb") as f:
+                run_results.append(pickle.load(f))
+            run_paths.append(run_output)
+    return run_results, run_paths
+
+
 def eval_all(args):
-    runs = completed_runs(args)
+    runs = [args.run] if args.run is not None else completed_runs(args)
+    if args.run is not None and not complete_run(args, args.run):
+        raise RuntimeError(f"run_{args.run:03d} is not complete and cannot be evaluated.")
     if not runs:
         raise RuntimeError("No complete Safety-Gym convergence runs found.")
     print("Evaluating runs:", ", ".join(f"run_{idx:03d}" for idx in runs))
@@ -530,8 +590,23 @@ def eval_all(args):
 
 
 def plot_only(args):
-    with open(args.output, "rb") as f:
-        results = pickle.load(f)
+    requested_steps = parse_steps(args.maxiters)
+    run_results, run_paths = load_available_run_results(args)
+    if run_results:
+        results = aggregate(run_results)
+        print(f"Plotting aggregate from {len(run_results)} run file(s):")
+        for run_output in run_paths:
+            print(f"  {run_output}")
+        results = filter_results_steps(results, requested_steps)
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.output, "wb") as f:
+            pickle.dump(results, f)
+        print(f"Aggregate results saved to {args.output}")
+    else:
+        with open(args.output, "rb") as f:
+            results = pickle.load(f)
+        print(f"No per-run files found under {args.runs_dir}; plotting {args.output}")
+        results = filter_results_steps(results, requested_steps)
     plot_results(results, args.output, args.figures_dir)
 
 
@@ -563,6 +638,8 @@ def build_parser():
     parser.add_argument("--figures_dir", default=str(DEFAULT_FIGURES_DIR))
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--eval-only", action="store_true", dest="eval_only")
+    parser.add_argument("--resume_training", action="store_true")
+    parser.add_argument("--resume-training", action="store_true", dest="resume_training")
     parser.add_argument("--plot_only", action="store_true")
     parser.add_argument("--plot-only", action="store_true", dest="plot_only")
     parser.add_argument("--plot", action="store_true", default=True)

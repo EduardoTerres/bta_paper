@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --partition=gpu_h100
-#SBATCH --gpus=3
+#SBATCH --gpus=1
 #SBATCH --job-name=eval
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9

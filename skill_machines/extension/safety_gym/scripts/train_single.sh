@@ -1,11 +1,12 @@
-#!/usr/bin/env bash
+#!/bin/bash
 #SBATCH --partition=gpu_h100
-#SBATCH --gpus=1
-#SBATCH --job-name=safety-plots
+#SBATCH --gpus=3
+#SBATCH --job-name=safety-train-single
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --time=01:00:00
-#SBATCH --output=safety_plots_%A.out
+#SBATCH --cpus-per-task=9
+#SBATCH --time=48:00:00
+#SBATCH --array=0-2
+#SBATCH --output=safety_train_single_%A_%a.out
 
 set -euo pipefail
 
@@ -16,10 +17,11 @@ conda activate sm
 
 export MPLCONFIGDIR="${SLURM_TMPDIR:-/tmp}/matplotlib"
 export MPLBACKEND=Agg
+export PYTHONUNBUFFERED=1
 mkdir -p "$MPLCONFIGDIR"
 
 export SAFETY_GYM_DATA_DIR="${SAFETY_GYM_DATA_DIR:-/scratch-shared/${USER}/bta_paper/safety_gym/exps_data_extension}"
-mkdir -p skill_machines/extension/safety_gym/exps_data_extension/slurm
+mkdir -p "$SAFETY_GYM_DATA_DIR/runs" "$SAFETY_GYM_DATA_DIR/logs" "$SAFETY_GYM_DATA_DIR/slurm"
 
 PROJECT_MUJOCO="$PWD/.local/mujoco/mujoco210"
 PROJECT_MUJOCO_PY="$PWD/.local/mujoco_py"
@@ -42,11 +44,20 @@ export LDFLAGS="-L/usr/lib64 -L${CONDA_PREFIX}/lib ${LDFLAGS:-}"
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:$MUJOCO_PY_MUJOCO_PATH/bin:$PROJECT_MUJOCO_COMPAT:${CONDA_PREFIX}/lib:/usr/lib64"
 export MUJOCO_PY_FORCE_CPU="${MUJOCO_PY_FORCE_CPU:-1}"
 
-python skill_machines/extension/safety_gym/exp_convergence.py \
-  --plot_only \
-  --training-output shards \
-  --runs 3 \
-  --maxiters 50000,100000,200000,400000,700000,1000000,1500000,2000000,2500000,3000000,3500000,4000000 \
+num_runs=3
+run="${SLURM_ARRAY_TASK_ID}"
+
+if (( run >= num_runs )); then
+  echo "Invalid array index ${SLURM_ARRAY_TASK_ID}: run ${run} >= ${num_runs}"
+  exit 1
+fi
+
+python -u skill_machines/extension/safety_gym/exp_convergence.py \
+  --run "$run" \
+  --training-output single \
+  --resume-training \
+  --runs "$num_runs" \
+  --maxiters 1000000,1200000,1400000,1600000,1800000,2000000 \
   --runs_dir "$SAFETY_GYM_DATA_DIR/runs" \
-  --output "$SAFETY_GYM_DATA_DIR/sm_convergence.pkl" \
-  --figures_dir "$PWD/skill_machines/extension/safety_gym/exps_data_extension/figures"
+  --log_dir "$SAFETY_GYM_DATA_DIR/logs" \
+  --wandb

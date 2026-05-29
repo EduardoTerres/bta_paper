@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --partition=gpu_h100
-#SBATCH --gpus=9
+#SBATCH --gpus=3
 #SBATCH --job-name=safety-train
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=48:00:00
+#SBATCH --time=16:00:00
 #SBATCH --array=0-17
 #SBATCH --output=safety_train_%A_%a.out
 
@@ -62,7 +62,7 @@ python -u skill_machines/extension/safety_gym/exp_convergence.py \
   --train-primitive "$primitive" \
   --training-output shards \
   --runs "$num_runs" \
-  --maxiters 10000,20000,30000,40000,50000,60000,70000,80000,90000,100000,150000,200000,300000,400000,500000,600000,700000,800000,900000,1000000 \
+  --maxiters 50000,100000,200000,400000,700000,1000000,1500000,2000000,2500000,3000000,3500000,4000000 \
   --runs_dir "$SAFETY_GYM_DATA_DIR/runs" \
   --log_dir "$SAFETY_GYM_DATA_DIR/logs" \
   --wandb

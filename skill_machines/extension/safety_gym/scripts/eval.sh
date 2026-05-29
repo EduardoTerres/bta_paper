@@ -1,11 +1,12 @@
 #!/bin/bash
 #SBATCH --partition=gpu_h100
-#SBATCH --gpus=1
+#SBATCH --gpus=2
 #SBATCH --job-name=safety-eval
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=12:00:00
-#SBATCH --output=/scratch-shared/eterrescaballe/bta_paper/safety_gym/exps_data_extension/slurm/safety_eval_%j.out
+#SBATCH --array=0-1
+#SBATCH --output=safety_eval_%A_%a.out
 
 set -euo pipefail
 
@@ -20,6 +21,7 @@ mkdir -p "$MPLCONFIGDIR"
 
 export SAFETY_GYM_DATA_DIR="${SAFETY_GYM_DATA_DIR:-/scratch-shared/${USER}/bta_paper/safety_gym/exps_data_extension}"
 mkdir -p "$SAFETY_GYM_DATA_DIR/runs" "$SAFETY_GYM_DATA_DIR/logs" "$SAFETY_GYM_DATA_DIR/slurm"
+run_id=$(printf "%03d" "$SLURM_ARRAY_TASK_ID")
 
 PROJECT_MUJOCO="$PWD/.local/mujoco/mujoco210"
 PROJECT_MUJOCO_PY="$PWD/.local/mujoco_py"
@@ -47,11 +49,15 @@ export MUJOCO_PY_FORCE_CPU="${MUJOCO_PY_FORCE_CPU:-1}"
 python skill_machines/extension/safety_gym/exp_convergence.py \
   --eval_only \
   --training-output shards \
-  --runs 3 \
-  --eval_episodes 100 \
-  --maxiters 100000,200000,400000,600000,800000,1000000 \
+  --runs 2 \
+  --run "$SLURM_ARRAY_TASK_ID" \
+  --eval_episodes 50 \
+  --maxiters 10000,100000,150000,300000,400000,700000,1000000,1500000,2000000 \
   --runs_dir "$SAFETY_GYM_DATA_DIR/runs" \
   --log_dir "$SAFETY_GYM_DATA_DIR/logs" \
-  --output "$SAFETY_GYM_DATA_DIR/sm_convergence.pkl" \
+  --output "$SAFETY_GYM_DATA_DIR/runs/run_${run_id}/sm_convergence.pkl" \
   --wandb \
   --no_plot
+
+  # --maxiters 50000,100000,200000,400000,700000,1000000,1500000,2000000,2500000,3000000,3500000,4000000 \
+#  --maxiters 10000,20000,30000,40000,50000,60000,70000,80000,90000,100000,150000,200000,300000,400000,700000,1000000,1500000,2000000 \

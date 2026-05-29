@@ -19,13 +19,13 @@ plt.rcParams.update(PLOT_RC)
 METHODS = ("original", "minmax", "boolean")
 METHOD_LABELS = {
     "original": r"Original",
-    "minmax": r"Univ./empty",
+    "minmax": r"Univ./empty (Ours)",
     "boolean": r"Base tasks",
 }
 COMPOSITION_TIME_METHODS = METHODS
 COLORS = {
-    "original": "#1A5276",
-    "minmax": "#C0560A",
+    "original": "#C0560A",
+    "minmax": "#1A5276",
     "boolean": "#2E7D32",
 }
 CONVERGENCE_MARKER = "^-"
@@ -172,6 +172,7 @@ def plot_results(results, output):
                 plt.close(fig)
         plot_average_returns_successes(results, maxiters, task_names, figure_dir)
         plot_composition_time_violins(results, maxiters, task_names, figure_dir)
+        plot_composition_time_boxplots(results, maxiters, task_names, figure_dir)
         print(f"Plots saved to {figure_dir}")
 
 
@@ -206,7 +207,7 @@ def plot_average_returns_successes(results, maxiters, task_names, figure_dir):
     if not has_returns or not has_successes:
         return
 
-    fig, ax_return = plt.subplots(figsize=(6, 4.5))
+    fig, ax_return = plt.subplots(figsize=(10.8, 4.5))
     ax_success = ax_return.twinx()
     return_handles = []
     success_handles = []
@@ -229,7 +230,7 @@ def plot_average_returns_successes(results, maxiters, task_names, figure_dir):
             (line,) = ax_success.plot(
                 maxiters,
                 successes,
-                marker="^",
+                marker="o",
                 linestyle="--",
                 color=COLORS[method],
                 linewidth=2,
@@ -243,7 +244,13 @@ def plot_average_returns_successes(results, maxiters, task_names, figure_dir):
     ax_success.tick_params(axis="y", labelsize=TICK_FONTSIZE)
     ax_success.set_ylim(0.0, 1.0)
     handles = return_handles + success_handles
-    ax_return.legend(handles=handles, fontsize=LEGEND_FONTSIZE)
+    ax_return.legend(
+        handles=handles,
+        fontsize=LEGEND_FONTSIZE,
+        loc="center left",
+        bbox_to_anchor=(1.18, 0.5),
+        borderaxespad=0.0,
+    )
     fig.tight_layout()
     fig.savefig(os.path.join(figure_dir, "average_returns_successes.png"), bbox_inches="tight", dpi=200)
     fig.savefig(os.path.join(figure_dir, "average_returns_successes.pdf"), bbox_inches="tight")
@@ -309,6 +316,7 @@ def plot_composition_time_violins(results, maxiters, task_names, figure_dir):
                     dtype=float,
                 )
                 values = values[np.isfinite(values)] * 1000.0
+                values = values[values > 0]
                 if len(values):
                     values_by_task.append(values)
             if values_by_task:
@@ -341,11 +349,81 @@ def plot_composition_time_violins(results, maxiters, task_names, figure_dir):
     ax.legend(handles=handles, fontsize=LEGEND_FONTSIZE)
     ax.set_xticks(base_positions)
     ax.set_xticklabels([TASK_LABELS.get(task_name, task_name) for task_name in task_names], rotation=20, ha="right")
+    ax.set_yscale("log")
     ax.set_ylabel("Composition time per action (ms)", fontsize=LABEL_FONTSIZE)
     ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
     fig.tight_layout()
     fig.savefig(os.path.join(figure_dir, "composition_time_violins.png"), bbox_inches="tight", dpi=200)
     fig.savefig(os.path.join(figure_dir, "composition_time_violins.pdf"), bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_composition_time_boxplots(results, maxiters, task_names, figure_dir):
+    has_values = any(
+        results[maxiter][task_name][method].get("composition_times")
+        for maxiter in maxiters
+        for task_name in task_names
+        for method in COMPOSITION_TIME_METHODS
+        if task_name in results[maxiter] and method in results[maxiter][task_name]
+    )
+    if not has_values:
+        return
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.5))
+    base_positions = np.arange(len(task_names))
+    offsets = np.linspace(-0.25, 0.25, len(COMPOSITION_TIME_METHODS))
+
+    for offset, method in zip(offsets, COMPOSITION_TIME_METHODS):
+        samples = []
+        positions = []
+        for idx, task_name in enumerate(task_names):
+            values_by_task = []
+            for maxiter in maxiters:
+                if task_name not in results[maxiter] or method not in results[maxiter][task_name]:
+                    continue
+                values = np.asarray(
+                    results[maxiter][task_name][method].get("composition_times", []),
+                    dtype=float,
+                )
+                values = values[np.isfinite(values)] * 1000.0
+                values = values[values > 0]
+                if len(values):
+                    values_by_task.append(values)
+            if values_by_task:
+                samples.append(np.concatenate(values_by_task))
+                positions.append(base_positions[idx] + offset)
+        if not samples:
+            continue
+        box = ax.boxplot(
+            samples,
+            positions=positions,
+            widths=0.18,
+            patch_artist=True,
+            showfliers=False,
+            manage_ticks=False,
+        )
+        for patch in box["boxes"]:
+            patch.set_facecolor(COLORS[method])
+            patch.set_edgecolor(COLORS[method])
+            patch.set_alpha(0.35)
+        for key in ("whiskers", "caps", "medians"):
+            for line in box[key]:
+                line.set_color(COLORS[method])
+                line.set_linewidth(2 if key == "medians" else 1.5)
+
+    handles = [
+        Patch(facecolor=COLORS[method], edgecolor=COLORS[method], alpha=0.35, label=METHOD_LABELS[method])
+        for method in COMPOSITION_TIME_METHODS
+    ]
+    ax.legend(handles=handles, fontsize=LEGEND_FONTSIZE)
+    ax.set_xticks(base_positions)
+    ax.set_xticklabels([TASK_LABELS.get(task_name, task_name) for task_name in task_names], rotation=20, ha="right")
+    ax.set_yscale("log")
+    ax.set_ylabel("Composition time per action (ms)", fontsize=LABEL_FONTSIZE)
+    ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
+    fig.tight_layout()
+    fig.savefig(os.path.join(figure_dir, "composition_time_boxplots.png"), bbox_inches="tight", dpi=200)
+    fig.savefig(os.path.join(figure_dir, "composition_time_boxplots.pdf"), bbox_inches="tight")
     plt.close(fig)
 
 

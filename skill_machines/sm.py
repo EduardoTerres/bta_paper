@@ -475,60 +475,129 @@ class GoalSetSkillPrimitive(SkillPrimitive):
 
     def __init__(self, exp, wvfs, goals, predicates):
         super().__init__(exp, wvfs, goals, predicates)
+        self.goals_size = None
+        self.selected_goal_key = None
+        self.selected_goal_batch = None
+        self.selected_goal_wvf = None
+        self._build_goal_cache()
+
+    def _build_goal_cache(self):
+        self.goals_array = np.array(list(self.goals.values()))
+        self.goals_size = len(self.goals_array)
+        self.goal_satisfies = np.array(
+            [
+                goal_satisfies_exp(self.primitive, goal, self.predicates)
+                for goal in self.goals_array
+            ]
+        )
+        self.candidate_goals = (
+            self.goals_array[self.goal_satisfies]
+            if self.goal_satisfies.any()
+            else self.goals_array
+        )
+        self.candidate_goal_batches = [
+            np.expand_dims(goal, axis=0) for goal in self.candidate_goals
+        ]
+        self.candidate_wvf = (
+            self.wvfs["1"] if self.goal_satisfies.any() else self.wvfs["0"]
+        )
+        self.goal_satisfies_by_key = {
+            goal.tobytes(): satisfies
+            for goal, satisfies in zip(self.goals_array, self.goal_satisfies)
+        }
+        self.goal_wvf = {
+            goal.tobytes(): self.wvfs["1" if satisfies else "0"]
+            for goal, satisfies in zip(self.goals_array, self.goal_satisfies)
+        }
+        self._clear_selected_goal()
+
+    def _refresh_goal_cache(self):
+        if len(self.goals) != self.goals_size:
+            self._build_goal_cache()
+
+    def _clear_selected_goal(self):
+        self.goal = None
+        self.selected_goal_key = None
+        self.selected_goal_batch = None
+        self.selected_goal_wvf = None
+
+    def _goal_satisfies(self, goal):
+        key = goal.tobytes()
+        if key in self.goal_satisfies_by_key:
+            return self.goal_satisfies_by_key[key]
+        return goal_satisfies_exp(self.primitive, goal, self.predicates)
+
+    def _set_goal(self, goal):
+        self.goal = goal
+        self.selected_goal_key = goal.tobytes()
+        self.selected_goal_batch = np.expand_dims(goal, axis=0)
+        self.selected_goal_wvf = self.goal_wvf.get(self.selected_goal_key)
+        if self.selected_goal_wvf is None:
+            self.selected_goal_wvf = (
+                self.wvfs["1"] if self._goal_satisfies(goal) else self.wvfs["0"]
+            )
 
     def get_action_value(self, states, desired_goal=None, vectorised=False):
         states = states.copy()
         if desired_goal is not None:
-            states["desired_goal"] = np.expand_dims(desired_goal, axis=0)
-            wvf = (
-                self.wvfs["1"]
-                if goal_satisfies_exp(self.primitive, desired_goal, self.predicates)
-                else self.wvfs["0"]
-            )
+            goal_key = desired_goal.tobytes()
+            if goal_key == self.selected_goal_key:
+                states["desired_goal"] = self.selected_goal_batch
+                wvf = self.selected_goal_wvf
+            else:
+                states["desired_goal"] = np.expand_dims(desired_goal, axis=0)
+                wvf = self.goal_wvf.get(goal_key)
+            if wvf is None:
+                wvf = (
+                    self.wvfs["1"]
+                    if self._goal_satisfies(desired_goal)
+                    else self.wvfs["0"]
+                )
             return wvf.get_action_value(states)
 
-        goals = np.array(list(self.goals.values()))
-        satisfies = np.array(
-            [goal_satisfies_exp(self.primitive, goal, self.predicates) for goal in goals]
-        )
-        candidate_goals = goals[satisfies] if satisfies.any() else goals
-        wvf = self.wvfs["1"] if satisfies.any() else self.wvfs["0"]
-
+        self._refresh_goal_cache()
         if not vectorised:
             actions, values = [], []
-            for goal in candidate_goals:
-                states["desired_goal"] = np.expand_dims(goal, axis=0)
-                action, value = wvf.get_action_value(states)
+            for goal_batch in self.candidate_goal_batches:
+                states["desired_goal"] = goal_batch
+                action, value = self.candidate_wvf.get_action_value(states)
                 actions.append(action[0])
                 values.append(value[0])
             goal_idx = np.argmax(values)
-            self.goal = candidate_goals[goal_idx]
+            self._set_goal(self.candidate_goals[goal_idx])
             if self.is_discrete:
                 return [actions[goal_idx]], [values[goal_idx]]
             return actions[goal_idx], values[goal_idx]
 
         shape = states["env_state"].shape
-        n_goals = len(candidate_goals)
-        states["desired_goal"] = np.concatenate([candidate_goals] * shape[0], axis=0)
+        n_goals = len(self.candidate_goals)
+        states["desired_goal"] = np.concatenate(
+            [self.candidate_goals] * shape[0], axis=0
+        )
         for key in states.keys():
             if key != "desired_goal":
                 states[key] = np.repeat(states[key], repeats=n_goals, axis=0)
-        actions, values = wvf.get_action_value(states)
+        actions, values = self.candidate_wvf.get_action_value(states)
         mask = [
             np.argmax(values[s * n_goals : (s + 1) * n_goals]) + s * n_goals
             for s in range(shape[0])
         ]
         if shape[0] == 1:
-            self.goal = states["desired_goal"][mask, :][0]
+            self._set_goal(states["desired_goal"][mask, :][0])
         if self.is_discrete:
             return actions[mask], values[mask]
         return actions[mask, :], values[mask]
 
     def get_action_goal_values(self, states):
+        self._refresh_goal_cache()
         goals = states["desired_goal"]
         mask = np.array(
-            [goal_satisfies_exp(self.primitive, goal, self.predicates) for goal in goals]
+            [self._goal_satisfies(goal) for goal in goals]
         )
+        if mask.all():
+            return self.wvfs["1"].get_action_value(states)
+        if not mask.any():
+            return self.wvfs["0"].get_action_value(states)
         max_actions, max_values = self.wvfs["1"].get_action_value(states)
         min_actions, min_values = self.wvfs["0"].get_action_value(states)
         if self.is_discrete:

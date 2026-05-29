@@ -18,10 +18,10 @@ METHOD_LABELS = {
     "minmax": "Univ./empty",
     "boolean": "Base tasks",
 }
-COMPOSITION_TIME_METHODS = ("original", "minmax")
+COMPOSITION_TIME_METHODS = METHODS
 COLORS = {
-    "original": "#1A5276",
-    "minmax": "#C0560A",
+    "original": "#C0560A",
+    "minmax": "#1A5276",
     "boolean": "#2E7D32",
 }
 TASK_LABELS = {
@@ -154,13 +154,12 @@ def print_composition_time_stats(rows):
     if not rows:
         return
 
-    headers = ("Task", "Step", "Method", "N", "Mean", "Std", "Median", "Q1", "Q3", "Min", "Max")
+    headers = ("Task", "Method", "N", "Mean", "Std", "Median", "Q1", "Q3", "Min", "Max")
     table = [headers]
-    for task, step, method, values in rows:
+    for task, method, values in rows:
         table.append(
             (
                 TASK_LABELS.get(task, task),
-                str(step),
                 METHOD_LABELS[method],
                 str(len(values)),
                 f"{np.mean(values):.3f}",
@@ -192,25 +191,17 @@ def plot_composition_time_violins(results, steps, task_names, out_dir):
     if not has_values:
         return
 
-    ncols = min(3, len(task_names))
-    nrows = math.ceil(len(task_names) / ncols)
-    fig, axes = plt.subplots(
-        nrows,
-        ncols,
-        figsize=(5.0 * ncols, 3.8 * nrows),
-        sharex=True,
-        squeeze=False,
-    )
-    axes = axes.reshape(-1)
-    offsets = np.linspace(-0.18, 0.18, len(COMPOSITION_TIME_METHODS))
-    base_positions = np.arange(len(steps))
+    fig, ax = plt.subplots(figsize=(7.0, 4.5))
+    base_positions = np.arange(len(task_names))
+    offsets = np.linspace(-0.25, 0.25, len(COMPOSITION_TIME_METHODS))
     stats_rows = []
 
-    for ax, task in zip(axes, task_names):
-        for offset, method in zip(offsets, COMPOSITION_TIME_METHODS):
-            samples = []
-            positions = []
-            for idx, step in enumerate(steps):
+    for offset, method in zip(offsets, COMPOSITION_TIME_METHODS):
+        samples = []
+        positions = []
+        for idx, task in enumerate(task_names):
+            values_by_task = []
+            for step in steps:
                 if task not in results[step] or method not in results[step][task]:
                     continue
                 values = np.asarray(
@@ -218,34 +209,29 @@ def plot_composition_time_violins(results, steps, task_names, out_dir):
                     dtype=float,
                 )
                 values = values[np.isfinite(values)] * 1000.0
+                values = values[values > 0]
                 if len(values):
-                    samples.append(values)
-                    positions.append(base_positions[idx] + offset)
-                    stats_rows.append((task, step, method, values))
-            if not samples:
-                continue
-            violins = ax.violinplot(
-                samples,
-                positions=positions,
-                widths=0.28,
-                showmeans=True,
-                showextrema=False,
-            )
-            for body in violins["bodies"]:
-                body.set_facecolor(COLORS[method])
-                body.set_edgecolor(COLORS[method])
-                body.set_alpha(0.35)
-            violins["cmeans"].set_color(COLORS[method])
-            violins["cmeans"].set_linewidth(2)
-
-        ax.set_title(TASK_LABELS.get(task, task), fontsize=TITLE_FONTSIZE)
-        ax.set_xticks(base_positions)
-        ax.set_xticklabels([str(step) for step in steps], rotation=30, ha="right")
-        ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
-        ax.grid(alpha=0.25)
-
-    for ax in axes[len(task_names):]:
-        ax.axis("off")
+                    values_by_task.append(values)
+            if values_by_task:
+                task_values = np.concatenate(values_by_task)
+                samples.append(task_values)
+                positions.append(base_positions[idx] + offset)
+                stats_rows.append((task, method, task_values))
+        if not samples:
+            continue
+        violins = ax.violinplot(
+            samples,
+            positions=positions,
+            widths=0.22,
+            showmeans=True,
+            showextrema=False,
+        )
+        for body in violins["bodies"]:
+            body.set_facecolor(COLORS[method])
+            body.set_edgecolor(COLORS[method])
+            body.set_alpha(0.35)
+        violins["cmeans"].set_color(COLORS[method])
+        violins["cmeans"].set_linewidth(2)
 
     print_composition_time_stats(stats_rows)
 
@@ -253,10 +239,14 @@ def plot_composition_time_violins(results, steps, task_names, out_dir):
         Patch(facecolor=COLORS[method], edgecolor=COLORS[method], alpha=0.35, label=METHOD_LABELS[method])
         for method in COMPOSITION_TIME_METHODS
     ]
-    fig.legend(handles=handles, loc="upper center", ncol=len(handles), fontsize=LEGEND_FONTSIZE)
-    fig.supxlabel("Training iterations per extended value function", fontsize=LABEL_FONTSIZE)
-    fig.supylabel("Composition time per action (ms)", fontsize=LABEL_FONTSIZE)
-    fig.tight_layout(rect=(0.02, 0.02, 1, 0.92))
+    ax.legend(handles=handles, fontsize=LEGEND_FONTSIZE)
+    ax.set_xticks(base_positions)
+    ax.set_xticklabels([TASK_LABELS.get(task, task) for task in task_names], rotation=20, ha="right")
+    ax.set_yscale("log")
+    ax.set_ylabel("Composition time per action (ms)", fontsize=LABEL_FONTSIZE)
+    ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
     fig.savefig(out_dir / "composition_time_violins.png", bbox_inches="tight", dpi=200)
     fig.savefig(out_dir / "composition_time_violins.pdf", bbox_inches="tight")
     plt.close(fig)
