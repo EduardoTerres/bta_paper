@@ -1,5 +1,5 @@
 Code for:
-"A goal-set based method for composition in the Boolean Task Algebra"
+"A Goal-Set Characterization of Task Composition in the Boolean Task Algebra"
 
 # Rooms environment
 The packages in this environment are managed through `uv`.
