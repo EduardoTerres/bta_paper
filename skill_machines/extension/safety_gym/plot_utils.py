@@ -211,23 +211,25 @@ def print_composition_time_stats(rows):
 
 
 def plot_composition_time_violins(results, steps, task_names, out_dir):
-    has_values = any(
-        results[step][task][method].get("composition_times")
-        for step in steps
-        for task in task_names
-        for method in COMPOSITION_TIME_METHODS
-        if task in results[step] and method in results[step][task]
-    )
-    if not has_values:
+    methods_with_values = []
+    for method in COMPOSITION_TIME_METHODS:
+        has_values = any(
+            results[step][task][method].get("composition_times")
+            for step in steps
+            for task in task_names
+            if task in results[step] and method in results[step][task]
+        )
+        if has_values:
+            methods_with_values.append(method)
+    if not methods_with_values:
         return
 
     fig, ax = plt.subplots(figsize=(7.0, 4.5))
     base_positions = np.arange(len(task_names))
-    offsets = np.linspace(-0.25, 0.25, len(COMPOSITION_TIME_METHODS))
+    offsets = np.linspace(-0.25, 0.25, len(methods_with_values)) if len(methods_with_values) > 1 else [0.0]
     stats_rows = []
-    plotted_methods = []
 
-    for offset, method in zip(offsets, COMPOSITION_TIME_METHODS):
+    for offset, method in zip(offsets, methods_with_values):
         samples = []
         positions = []
         for idx, task in enumerate(task_names):
@@ -250,7 +252,6 @@ def plot_composition_time_violins(results, steps, task_names, out_dir):
                 stats_rows.append((task, method, task_values))
         if not samples:
             continue
-        plotted_methods.append(method)
         violins = ax.violinplot(
             samples,
             positions=positions,
@@ -269,7 +270,7 @@ def plot_composition_time_violins(results, steps, task_names, out_dir):
 
     handles = [
         Patch(facecolor=COLORS[method], edgecolor=COLORS[method], alpha=0.35, label=METHOD_LABELS[method])
-        for method in plotted_methods
+        for method in methods_with_values
     ]
     ax.legend(handles=handles, fontsize=LEGEND_FONTSIZE)
     ax.set_xticks(base_positions)
