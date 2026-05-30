@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=12:00:00
-#SBATCH --array=0-1
+#SBATCH --array=0
 #SBATCH --output=safety_eval_%A_%a.out
 
 set -euo pipefail
@@ -48,16 +48,19 @@ export MUJOCO_PY_FORCE_CPU="${MUJOCO_PY_FORCE_CPU:-1}"
 # file per WVF. Use --training-output single for older sequential checkpoints.
 python skill_machines/extension/safety_gym/exp_convergence.py \
   --eval_only \
-  --training-output shards \
-  --runs 2 \
+  --training-output single \
+  --runs 1 \
   --run "$SLURM_ARRAY_TASK_ID" \
-  --eval_episodes 500 \
-  --maxiters 10000,100000,150000,300000,400000,700000,1000000,1500000,2000000 \
+  --eval_episodes 50 \
+  --maxiters 50000,100000,200000,400000,700000,1000000,1500000,2000000,2500000,3000000,3500000,4000000 \
   --runs_dir "$SAFETY_GYM_DATA_DIR/runs" \
   --log_dir "$SAFETY_GYM_DATA_DIR/logs" \
-  --output "$SAFETY_GYM_DATA_DIR/runs/run_${run_id}/sm_convergence.pkl" \
+  --output "$SAFETY_GYM_DATA_DIR/runs/run_${run_id}/sm_convergence_1run.pkl" \
   --wandb \
   --no_plot
 
-  # --maxiters 50000,100000,200000,400000,700000,1000000,1500000,2000000,2500000,3000000,3500000,4000000 \
-#  --maxiters 10000,20000,30000,40000,50000,60000,70000,80000,90000,100000,150000,200000,300000,400000,700000,1000000,1500000,2000000 \
+# with base tasks
+# --maxiters 10000,100000,150000,300000,400000,700000,1000000,1500000,2000000 \
+
+# without
+# --maxiters 50000,100000,200000,400000,700000,1000000,1500000,2000000,2500000,3000000,3500000,4000000 \
