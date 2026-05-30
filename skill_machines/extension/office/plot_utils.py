@@ -20,7 +20,7 @@ METHODS = ("original", "minmax", "boolean")
 METHOD_LABELS = {
     "original": r"Original SM",
     "minmax": r"Univ./empty (Ours)",
-    "boolean": r"Base tasks BTA",
+    "boolean": r"Base tasks",
 }
 COMPOSITION_TIME_METHODS = METHODS
 COLORS = {
