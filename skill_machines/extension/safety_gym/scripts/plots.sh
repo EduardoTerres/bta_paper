@@ -45,8 +45,14 @@ export MUJOCO_PY_FORCE_CPU="${MUJOCO_PY_FORCE_CPU:-1}"
 python skill_machines/extension/safety_gym/exp_convergence.py \
   --plot_only \
   --training-output single \
-  --runs 2 \
-  --maxiters 10000,100000,150000,300000,400000,700000,1000000,1500000,2000000 \
+  --runs 1 \
+  --maxiters 50000,100000,200000,400000,700000,1000000,1500000,2000000,2500000,3000000,3500000,4000000 \
   --runs_dir "$SAFETY_GYM_DATA_DIR/runs" \
-  --output "$SAFETY_GYM_DATA_DIR/sm_convergence_1run.pkl" \
+  --output "$SAFETY_GYM_DATA_DIR/runs/run_000/sm_convergence_1run_2.pkl" \
   --figures_dir "$PWD/skill_machines/extension/safety_gym/exps_data_extension/figures_1run"
+
+# 2 runs
+# --maxiters 10000,100000,150000,300000,400000,700000,1000000,1500000,2000000 \
+
+# 1 run with more iters
+# --maxiters 50000,100000,200000,400000,700000,1000000,1500000,2000000,2500000,3000000,3500000,4000000 \

@@ -239,7 +239,7 @@ def plot_average_returns_successes(results, maxiters, task_names, figure_dir):
             )
             success_handles.append(line)
 
-    _format_axis(ax_return, with_xlabel=True, ylabel="Episode return")
+    _format_axis(ax_return, with_xlabel=False, ylabel="Episode return")
     ax_success.set_ylabel("Success rate", fontsize=LABEL_FONTSIZE)
     ax_success.tick_params(axis="y", labelsize=TICK_FONTSIZE)
     ax_success.set_ylim(0.0, 1.0)

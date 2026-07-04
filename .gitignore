@@ -29,3 +29,5 @@ skill_machines/extension/exps_data_extension_safety/*
 *.h5
 
 disk_usage.txt
+
+mdp_homomorpshim/**/*

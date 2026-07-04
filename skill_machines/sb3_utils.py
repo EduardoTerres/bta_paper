@@ -153,7 +153,7 @@ class TD3Agent(BaseAgent):
                     replay_buffer_class = None if not use_her else WVFReplayBuffer,
                     replay_buffer_kwargs = None if not use_her else dict(n_sampled_goal = use_her, goal_selection_strategy = "future", ),
                     action_noise = NormalActionNoise(mean=np.zeros(self.action_space.shape[-1]), sigma=0.2 * np.ones(self.action_space.shape[-1])),
-                    learning_rate=2e-6, gamma=0.99, batch_size=32, learning_starts=1000, train_freq=50, gradient_steps=50, buffer_size=buffer_size
+                    learning_rate=1e-6, gamma=0.99, batch_size=32, learning_starts=1000, train_freq=50, gradient_steps=50, buffer_size=buffer_size
                 )
         if log_dir: self.model.set_logger(configure(log_dir+self.name, ["stdout", "csv", "tensorboard"]))
         if load: self.model = self.model_class.load(save_dir+self.name, env=env, buffer_size=buffer_size)
