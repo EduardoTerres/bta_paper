@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --partition=gpu_h100
-#SBATCH --gpus=3
+#SBATCH --gpus=1
 #SBATCH --job-name=safety-train-single
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=48:00:00
-#SBATCH --array=0-1
+#SBATCH --time=36:00:00
+#SBATCH --array=0
 #SBATCH --output=safety_train_single_%A_%a.out
 
 set -euo pipefail
@@ -20,7 +20,7 @@ export MPLBACKEND=Agg
 export PYTHONUNBUFFERED=1
 mkdir -p "$MPLCONFIGDIR"
 
-export SAFETY_GYM_DATA_DIR="${SAFETY_GYM_DATA_DIR:-/scratch-shared/${USER}/bta_paper/safety_gym/exps_data_extension}"
+export SAFETY_GYM_DATA_DIR="${SAFETY_GYM_DATA_DIR:-/scratch-local/${USER}/bta_paper/safety_gym/exps_data_extension}"
 mkdir -p "$SAFETY_GYM_DATA_DIR/runs" "$SAFETY_GYM_DATA_DIR/logs" "$SAFETY_GYM_DATA_DIR/slurm"
 
 PROJECT_MUJOCO="$PWD/.local/mujoco/mujoco210"
@@ -55,7 +55,6 @@ fi
 python -u skill_machines/extension/safety_gym/exp_convergence.py \
   --run "$run" \
   --training-output single \
-  --resume-training \
   --runs "$num_runs" \
   --maxiters 50000,100000,200000,400000,700000,1000000,1500000,2000000,2500000,3000000,3500000,4000000 \
   --runs_dir "$SAFETY_GYM_DATA_DIR/runs" \

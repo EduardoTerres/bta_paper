@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=12:00:00
-#SBATCH --array=0
+#SBATCH --array=0-1
 #SBATCH --output=safety_eval_%A_%a.out
 
 set -euo pipefail
@@ -49,13 +49,13 @@ export MUJOCO_PY_FORCE_CPU="${MUJOCO_PY_FORCE_CPU:-1}"
 python skill_machines/extension/safety_gym/exp_convergence.py \
   --eval_only \
   --training-output single \
-  --runs 1 \
+  --runs 2 \
   --run "$SLURM_ARRAY_TASK_ID" \
-  --eval_episodes 50 \
+  --eval_episodes 5 \
   --maxiters 50000,100000,200000,400000,700000,1000000,1500000,2000000,2500000,3000000,3500000,4000000 \
   --runs_dir "$SAFETY_GYM_DATA_DIR/runs" \
   --log_dir "$SAFETY_GYM_DATA_DIR/logs" \
-  --output "$SAFETY_GYM_DATA_DIR/runs/run_${run_id}/sm_convergence_1run.pkl" \
+  --output "$SAFETY_GYM_DATA_DIR/runs/run_${run_id}/sm_convergence_1run_2.pkl" \
   --wandb \
   --no_plot
 

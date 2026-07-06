@@ -17,10 +17,9 @@ EXTENSION_ROOT = SCRIPT_DIR.parent
 ROOT = EXTENSION_ROOT.parent
 PROJECT_ROOT = ROOT.parent
 
-
 def default_scratch_data_dir():
     username = os.environ.get("USER") or os.environ.get("LOGNAME") or Path.home().name
-    return Path("/scratch-shared") / username / "bta_paper" / "safety_gym" / "exps_data_extension"
+    return Path("/scratch-local") / username / "bta_paper" / "safety_gym" / "exps_data_extension"
 
 
 DATA_DIR = Path(os.environ.get("SAFETY_GYM_DATA_DIR", default_scratch_data_dir()))

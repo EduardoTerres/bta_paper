@@ -1,13 +1,17 @@
 from itertools import chain, combinations
+from typing import Dict, List, Tuple
+
 import numpy as np
+
+np.object = object  # Fix for mypy error: "Type 'object' is not subscriptable"
 
 # ------------------------------------
 # Types
 # ------------------------------------
-GoalType = tuple[int, int]
-TerminalStatesType = list[list[GoalType]]
-BasisType = list[list[GoalType]]
-TasksType = list[list[GoalType]]
+GoalType = Tuple[int, int]
+TerminalStatesType = List[List[GoalType]]
+BasisType = List[List[GoalType]]
+TasksType = List[List[GoalType]]
 
 # ------------------------------------
 # Utils
@@ -24,7 +28,9 @@ def all_combinations(iterable):
     s.sort(key=lambda x: (len(x), x))
     return s
 
-def get_base_tasks(goals: list[GoalType]) -> tuple[BasisType, dict[GoalType, list[list[int]]]]:
+def get_base_tasks(
+    goals: List[GoalType],
+) -> Tuple[BasisType, Dict[GoalType, List[List[int]]]]:
     """
     Given a list of goals, this function generates a set of 'base tasks' such that
     each base task is a subset of goals corresponding to a column in the binary encoding
