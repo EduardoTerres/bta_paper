@@ -1,3 +1,4 @@
+__pycache__/
 boolean_composition/*pyc
 boolean_composition/exps_data/
 boolean_composition/exps_data_extension/
@@ -31,3 +32,12 @@ skill_machines/extension/exps_data_extension_safety/*
 disk_usage.txt
 
 mdp_homomorpshim/**/*
+GCB/rlkit/**
+*.pyc
+*.png
+*.jpg
+*.binvox
+*.mtl
+*.wrl
+*.gif
+*.stl
