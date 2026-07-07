@@ -1,0 +1,2 @@
+from environments.four_rooms.four_rooms_wrapper import FourRoomsGoalEnv
+

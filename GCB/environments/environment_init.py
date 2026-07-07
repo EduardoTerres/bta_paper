@@ -114,8 +114,12 @@ def load_env(details):
 
 		env = SawyerWrapper(env, env_args['frame_stack_count'], env_args['action_repeat'])
 
+	elif env_args['package'] == 'four_rooms':
+		from environments.four_rooms import FourRoomsGoalEnv
+
+		env = FourRoomsGoalEnv(**env_args['domain_kwargs'])
+
 	else:
 		raise NotImplementedError
 
 	return env
-

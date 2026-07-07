@@ -189,7 +189,6 @@ class DeterministicHyperparameterSweeper(Sweeper):
                 hyperparameters,
                 copy.deepcopy(self._default_kwargs),
                 ignore_duplicate_keys_in_second_dict=True,
-                print_info=verbose
             )
             for hyperparameters in self._hyperparameters_dicts
         ]

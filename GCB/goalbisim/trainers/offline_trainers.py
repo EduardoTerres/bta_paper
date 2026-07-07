@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import dmc2gym
 import time
+from tqdm import tqdm
 from goalbisim.utils.misc_utils import set_seed_everywhere, FrameStack, GoalFrameStack
 from goalbisim.data.management.replaybuffer import ReplayBuffer
 from goalbisim.agents.pixelsac import PixelSACAgent
@@ -10,6 +11,7 @@ from goalbisim.representation.base_representation import initialize_representati
 from rlkit.core import logger
 from goalbisim.testing.eval_rl import evaluate_agent
 from goalbisim.testing.eval_rl import evaluate_goal_agent
+from goalbisim.testing.eval_rl import evaluate_joint_goal_agent
 from goalbisim.utils.misc_utils import eval_mode
 from loggers.wandb.wandb_init import setup_logger
 from environments.environment_init import load_env
@@ -19,6 +21,25 @@ from goalbisim.testing.init_testing import init_testing
 from goalbisim.agents.agent_init import agent_initalization
 import wandb
 import random
+from itertools import combinations
+
+
+JOINT_EVAL_SEED = 42
+JOINT_EVAL_MAX_SETS = 5
+JOINT_EVAL_EPISODES = 5
+
+
+def _sample_joint_goal_sets(goal_positions):
+    """For N=2..len(goal_positions), fix (once, via a constant seed independent of the
+    training seed) up to JOINT_EVAL_MAX_SETS goal subsets of size N. These are reused for
+    every evaluation call throughout training so the joint-MDP metrics are comparable over time."""
+    rng = random.Random(JOINT_EVAL_SEED)
+    goal_sets = {}
+    for n in range(2, len(goal_positions) + 1):
+        combos = list(combinations(goal_positions, n))
+        rng.shuffle(combos)
+        goal_sets[n] = combos[:JOINT_EVAL_MAX_SETS]
+    return goal_sets
 
 
 def train_representation_offline(details):
@@ -33,6 +54,8 @@ def train_representation_offline(details):
 
     env = load_env(details)
     eval_env = load_env(details)
+
+    joint_goal_sets = _sample_joint_goal_sets(eval_env.goal_positions) if hasattr(eval_env, 'goal_positions') else {}
 
     device = torch.device(details['device'])
 
@@ -96,14 +119,18 @@ def train_representation_offline(details):
 
     best_success_rate = 0
     add_to = 0
+    log_freq = details.get('log_freq', details['eval_freq'])
 
-    for step in range(details['training_iterations']):
+    pbar = tqdm(range(details['training_iterations']), desc='offline training')
+    for step in pbar:
         if step % details['eval_freq'] == 0:
             conditional = True if details['representation_algorithm'] == 'Ccvae' else False
 
             success_rate, video, goalvideo, success_stats, seed_list, samples = evaluate_goal_agent(eval_env, agent, details['discount'], details['num_eval_episodes'], step + add_to, details, conditional = conditional, analogy_goal = details.get('analogy_goal', False))
             rel_success_rate, rel_video, rel_goalvideo, rel_success_stats, rel_seed_list, rel_samples = evaluate_goal_agent(eval_env, best_agent, details['discount'], details['num_eval_episodes'], step + add_to, details, conditional = conditional, analogy_goal = details.get('analogy_goal', False))
-            
+
+            pbar.set_postfix(success_rate=success_rate, best_success_rate=best_success_rate)
+
             if success_rate > rel_success_rate:
                 agent.save(logger.get_snapshot_dir(), 'best_agent')
                 best_agent.load(logger.get_snapshot_dir(), 'best_agent')
@@ -136,6 +163,17 @@ def train_representation_offline(details):
                     }
             logger.logging_tool.log(stats)
 
+            for n, goal_sets in joint_goal_sets.items():
+                set_success_rates, set_episode_rewards = zip(*[
+                    evaluate_joint_goal_agent(eval_env, agent, details['discount'], goals, JOINT_EVAL_EPISODES, conditional=conditional)
+                    for goals in goal_sets
+                ])
+                logger.logging_tool.log({
+                    'train_step': step + add_to,
+                    f'eval_joint/avg_success/N_{n}': float(np.mean(set_success_rates)),
+                    f'eval_joint/avg_episode_reward/N_{n}': float(np.mean(set_episode_rewards)),
+                })
+
 
 
                 
@@ -152,6 +190,9 @@ def train_representation_offline(details):
             logger.logging_tool.record()
 
         agent.update(replay_buffer, step + add_to)
+
+        if log_freq and step % log_freq == 0 and step % details['eval_freq'] != 0:
+            logger.logging_tool.record()
 
     add_to = add_to + details['training_iterations']
     ignore_first = True

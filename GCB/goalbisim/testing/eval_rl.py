@@ -156,3 +156,36 @@ def evaluate_goal_agent(env, agent, discount, num_episodes, step, details, input
     #gather_samples[1] = np.concatenate(gather_samples[1])
 
     return np.mean(success), video, goalvideo, stats, seeds, gather_samples
+
+
+def evaluate_joint_goal_agent(env, agent, discount, goal_positions, num_episodes, conditional=False):
+    """Evaluate on the joint MDP whose terminal states are the union of `goal_positions`
+    (see boolean_composition): an episode succeeds if the agent reaches ANY of them.
+    Returns (mean_success_rate, mean_discounted_episode_reward)."""
+    successes = []
+    episode_rewards = []
+    for _ in range(num_episodes):
+        obs, goal, extra = env.reset_joint(goal_positions)
+        init_obs = obs
+        done = False
+        success = 0.0
+        episode_reward = 0.0
+        episode_step = 0
+        while not done:
+            with eval_mode(agent):
+                if conditional:
+                    concat_obs = np.concatenate((obs, init_obs), axis=0)
+                    concat_goal = np.concatenate((goal, init_obs), axis=0)
+                    action = agent.sample_action(concat_obs, concat_goal, init_obs=init_obs)
+                else:
+                    action = agent.sample_action(obs, goal, init_obs=init_obs)
+
+            obs, reward, done, info = env.step(action)
+            success = float(reward > 0.01)
+            episode_reward += reward * (discount ** episode_step)
+            episode_step += 1
+
+        successes.append(success)
+        episode_rewards.append(episode_reward)
+
+    return float(np.mean(successes)), float(np.mean(episode_rewards))
