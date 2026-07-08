@@ -4,6 +4,7 @@ import os
 import random
 import time
 from collections import deque
+from itertools import cycle
 
 import numpy as np
 import torch
@@ -11,7 +12,7 @@ import torch
 import goalbisim.utils.hyperparameter as hyp
 from environments.environment_init import load_env
 from goalbisim.data.management.goalreplaybuffer import GoalReplayBuffer
-from goalbisim.trainers.offline_trainers import train_representation_offline
+from goalbisim.trainers.offline_trainers import _sample_joint_goal_sets, train_representation_offline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,8 +30,12 @@ def one_hot(action, n=5):
 
 def oracle_action(env):
     start = tuple(env.env.state[1])
-    goal = tuple(env._goal_position)
-    if start == goal:
+    goals = (
+        set(env._joint_goal_positions)
+        if env._joint_goal_positions is not None
+        else {tuple(env._goal_position)}
+    )
+    if start in goals:
         return one_hot(4)
 
     moves = [(0, (-1, 0)), (1, (0, 1)), (2, (1, 0)), (3, (0, -1))]
@@ -47,12 +52,12 @@ def oracle_action(env):
             if nxt not in env.env.possiblePositions:
                 continue
             next_first = action if first_action is None else first_action
-            if nxt == goal:
+            if nxt in goals:
                 return one_hot(next_first)
             seen.add(nxt)
             queue.append((nxt, next_first))
 
-    log.warning("oracle_action: no path found from %s to %s, taking random action", start, goal)
+    log.warning("oracle_action: no path found from %s to any of %s, taking random action", start, goals)
     return one_hot(env.env.action_space.sample())
 
 
@@ -82,8 +87,24 @@ def collect_four_rooms_replay(details, save_path, num_steps):
     num_episodes = 0
     num_successes = 0
 
+    train_multi_goal = details.get("train_multi_goal", False)
+    goal_set_cycle = None
+    if train_multi_goal:
+        # Reuse the exact fixed goal sets that eval's evaluate_joint_goal_agent will be
+        # scored on (same seeded sampler), rather than resampling new sets every episode.
+        joint_goal_sets = _sample_joint_goal_sets(env.goal_positions)
+        train_goal_sets = [goals for sets in joint_goal_sets.values() for goals in sets]
+        log.info(
+            "train_multi_goal: cycling through %d fixed eval goal sets (sizes %s)",
+            len(train_goal_sets), sorted(joint_goal_sets.keys()),
+        )
+        goal_set_cycle = cycle(train_goal_sets)
+
     while replay.idx < num_steps:
-        obs, goal, extra = env.reset()
+        if train_multi_goal:
+            obs, goal, extra = env.reset_joint(next(goal_set_cycle))
+        else:
+            obs, goal, extra = env.reset()
         done = False
         episode_len = 0
         while not done:
@@ -130,9 +151,12 @@ def collect_four_rooms_replay(details, save_path, num_steps):
 
 
 def build_variant(args):
-    dataset_loc = args.dataset_loc or f"replay_four_rooms_{args.num_rooms}.pt"
+    goal_mode = "multigoal" if args.train_multi_goal else "singlegoal"
+    dataset_suffix = "_multigoal" if args.train_multi_goal else ""
+    dataset_loc = args.dataset_loc or f"replay_four_rooms_{args.num_rooms}{dataset_suffix}.pt"
     return dict(
         training_form="dataset",
+        train_multi_goal=args.train_multi_goal,
         discount=0.99,
         env_kwargs=dict(
             package="four_rooms",
@@ -226,8 +250,8 @@ def build_variant(args):
         save_wandb_video=False,
         device=args.device,
         project_name="gcb-four-rooms",
-        group=f"GCRB_four_rooms_{args.num_rooms}",
-        name=f"gcb-rooms-{args.num_rooms}",
+        group=f"GCRB_four_rooms_{args.num_rooms}_{goal_mode}_iters{args.training_iterations}",
+        name=f"gcb-rooms-{args.num_rooms}_{goal_mode}_iters{args.training_iterations}",
     )
 
 
@@ -245,6 +269,10 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--use-wandb", action="store_true")
     parser.add_argument("--no-collect", action="store_true")
+    parser.add_argument("--train-multi-goal", action="store_true",
+                         help="Collect episodes on the same fixed joint goal sets used by "
+                              "eval's evaluate_joint_goal_agent (env.reset_joint), instead of "
+                              "only single-goal episodes")
     parser.add_argument("--seed", type=int, default=None,
                          help="Seed for reproducibility; random if unset")
     args = parser.parse_args()

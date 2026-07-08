@@ -4,7 +4,7 @@
 #SBATCH --job-name=gcb-4-rooms
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=00:30:00
+#SBATCH --time=06:00:00
 #SBATCH --output=gcb_4_rooms_%A.out
 
 cd /home/eterrescaballe/bta_paper/GCB/extension/
@@ -17,8 +17,9 @@ export WANDB_MODE=online
 
 python offline_gcab_four_rooms_vision.py \
     --num-rooms 4 \
-    --training-iterations 10000 \
-    --eval-freq 100 \
-    --log-freq 50 \
+    --training-iterations 50000 \
+    --eval-freq 200 \
+    --log-freq 200 \
     --seed 0 \
-    --use-wandb
+    --use-wandb \
+    # --train-multi-goal
