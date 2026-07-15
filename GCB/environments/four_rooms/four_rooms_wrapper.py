@@ -114,6 +114,26 @@ class FourRoomsGoalEnv(gym.Env):
     def _joint_goal_obs(self, goal_positions):
         return self._make_obs(self._goal_position, extra_positions=goal_positions)
 
+    def render_goal_set(self, positions):
+        """Pure rendering of an arbitrary goal cell set (green dots only, no blue
+        marker). Unlike `_joint_goal_obs`, this does not depend on the episode's
+        current `_goal_position`, so it can render e.g. an intersection/union of
+        two sampled goal sets that may not include it (or may be empty)."""
+        grid = np.zeros((self.env.n, self.env.m, 3), dtype=np.uint8)
+        grid[:, :] = np.array([255, 255, 255], dtype=np.uint8)
+
+        for x, y in self.env.walls:
+            grid[x, y] = np.array([0, 0, 0], dtype=np.uint8)
+
+        for x, y in positions:
+            grid[x, y] = np.array([0, 180, 0], dtype=np.uint8)
+
+        scale_x = int(np.ceil(self.obs_img_dim / self.env.n))
+        scale_y = int(np.ceil(self.obs_img_dim / self.env.m))
+        image = np.kron(grid, np.ones((scale_x, scale_y, 1), dtype=np.uint8))
+        image = image[: self.obs_img_dim, : self.obs_img_dim]
+        return image.transpose(2, 0, 1).copy()
+
     def _next_goal_index(self):
         if not self._goal_cycle:
             self._goal_cycle = list(range(len(self.goal_positions)))

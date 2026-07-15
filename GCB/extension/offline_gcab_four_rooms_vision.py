@@ -206,6 +206,7 @@ def build_variant(args):
             dual_optimization=False,
             steps_till_on_policy=0,
             phi_updates_before_psi=0,
+            compositionality_weight=args.compositionality_weight,
         ),
         training_transforms=[],
         eval_transforms=[],
@@ -250,8 +251,8 @@ def build_variant(args):
         save_wandb_video=False,
         device=args.device,
         project_name="gcb-four-rooms",
-        group=f"GCRB_four_rooms_{args.num_rooms}_{goal_mode}_iters{args.training_iterations}",
-        name=f"gcb-rooms-{args.num_rooms}_{goal_mode}_iters{args.training_iterations}",
+        group=f"GCRB_four_rooms_{args.num_rooms}_{goal_mode}_iters{args.training_iterations}_compw{args.compositionality_weight}",
+        name=f"gcb-rooms-{args.num_rooms}_{goal_mode}_iters{args.training_iterations}_compw{args.compositionality_weight}",
     )
 
 
@@ -273,6 +274,11 @@ if __name__ == "__main__":
                          help="Collect episodes on the same fixed joint goal sets used by "
                               "eval's evaluate_joint_goal_agent (env.reset_joint), instead of "
                               "only single-goal episodes")
+    parser.add_argument("--compositionality-weight", type=float, default=0.0,
+                         help="Weight on the auxiliary loss enforcing "
+                              "psi(g1 & g2) ~= min(psi(g1), psi(g2)) and "
+                              "psi(g1 | g2) ~= max(psi(g1), psi(g2)) over randomly sampled "
+                              "goal-set pairs. 0 disables it (default)")
     parser.add_argument("--seed", type=int, default=None,
                          help="Seed for reproducibility; random if unset")
     args = parser.parse_args()

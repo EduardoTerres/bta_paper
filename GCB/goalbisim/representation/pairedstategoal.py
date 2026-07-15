@@ -1,3 +1,4 @@
+import random
 import torch
 import torch.nn as nn
 from goalbisim.representation.encoders.RADencoder import PixelEncoder
@@ -36,13 +37,22 @@ class PairedStateGoal(nn.Module):
             num_filters = 32,
             output_logits = True,
             lr=1e-3,
-            weight_decay = 0):
+            weight_decay = 0,
+            ground_space = True,
+            compositionality_weight = 0.0,
+            compositionality_batch_size = 32):
         super().__init__()
 
         self.device = device
         self.encoder = PixelEncoder(obs_shape, feature_dim, num_layers, num_filters, output_logits = output_logits, goal_flag = True).to(self.device)
         self.phi = self
-        
+
+        self.ground_space = ground_space
+        self.compositionality_weight = compositionality_weight
+        self.compositionality_batch_size = compositionality_batch_size
+        self._comp_pool_minmax = None
+        self._comp_pool_neg = None
+
         self.action_scale = action_scale
         self.decode_both = decode_both
         self.metric_loss = metric_loss
@@ -137,6 +147,88 @@ class PairedStateGoal(nn.Module):
         z_out = self.encoder(obs, detach = detach)
 
         return z_out
+
+    def set_compositionality_pool(self, minmax_pool, neg_pool = None):
+        """minmax_pool maps N -> (members, union, inter), members shape (S, N, 3, H, W);
+        enforces phi(s, g_1 u ... u g_N) ~ max_i phi(s, g_i) and
+        phi(s, g_1 n ... n g_N) ~ min_i phi(s, g_i). neg_pool maps subset-size k -> (goal,
+        not_goal); enforces phi(s, NOT g) ~ 1 - phi(s, g). Unlike the disabled psi version
+        (GoalBisim.compositionality_loss), these targets are all conditioned on a state s
+        -- see compositionality_loss, which pairs each pool entry with a random state from
+        the live training batch, since e.g. V(s, g1 u g2) = max(V(s,g1), V(s,g2)) is itself
+        a state-conditioned identity, not a pure-goal one."""
+        self._comp_pool_minmax = {
+            n: (members.to(self.device), union.to(self.device), inter.to(self.device))
+            for n, (members, union, inter) in minmax_pool.items()
+        } if minmax_pool else None
+        self._comp_pool_neg = {
+            k: (goal.to(self.device), not_goal.to(self.device))
+            for k, (goal, not_goal) in neg_pool.items()
+        } if neg_pool else None
+
+    def _grounded_encode(self, state, goal):
+        z = self.encode(state, goal)
+        if self.ground_space:
+            z = z - self.encode(goal, goal)
+        return z
+
+    def compositionality_loss_minmax(self, obs, members, union_img, inter_img):
+        batch, n = members.shape[0], members.shape[1]
+        state_rep = obs.unsqueeze(1).expand(-1, n, *obs.shape[1:]).reshape(batch * n, *obs.shape[1:])
+        flat_members = members.reshape(batch * n, *members.shape[2:])
+        z_members = self._grounded_encode(state_rep, flat_members).reshape(batch, n, -1)
+
+        z_union = self._grounded_encode(obs, union_img)
+        z_inter = self._grounded_encode(obs, inter_img)
+
+        union_loss = self.mse(z_union, z_members.max(dim=1).values)
+        inter_loss = self.mse(z_inter, z_members.min(dim=1).values)
+        return union_loss + inter_loss
+
+    def compositionality_loss_negation(self, obs, goal_img, not_goal_img):
+        z_goal = self._grounded_encode(obs, goal_img)
+        z_not_goal = self._grounded_encode(obs, not_goal_img)
+        return self.mse(z_not_goal, 1 - z_goal)
+
+    def compositionality_loss(self, obs, step, log = True, beginning = 'train'):
+        """Draws one random min/max tuple and one random negation pair from the pools,
+        each paired with random states drawn from the live batch `obs` (a different
+        random state per pool entry, since the identity should hold for any state, not
+        just ones correlated with how the pool was built)."""
+        comp_loss = torch.zeros((), device=self.device)
+
+        if self._comp_pool_minmax:
+            n = random.choice(list(self._comp_pool_minmax.keys()))
+            members, union_img, inter_img = self._comp_pool_minmax[n]
+            m = min(self.compositionality_batch_size, members.shape[0], obs.shape[0])
+            pool_idx = torch.randint(0, members.shape[0], (m,), device=self.device)
+            state_idx = torch.randint(0, obs.shape[0], (m,), device=self.device)
+            minmax_loss = self.compositionality_loss_minmax(
+                obs[state_idx], members[pool_idx], union_img[pool_idx], inter_img[pool_idx])
+            comp_loss = comp_loss + minmax_loss
+            if log:
+                logger.logging_tool.log({
+                    'step': step,
+                    beginning + '/phi/compositionality_minmax_loss': minmax_loss.item(),
+                    beginning + '/phi/compositionality_n': n,
+                })
+
+        if self._comp_pool_neg:
+            k = random.choice(list(self._comp_pool_neg.keys()))
+            goal_img, not_goal_img = self._comp_pool_neg[k]
+            m = min(self.compositionality_batch_size, goal_img.shape[0], obs.shape[0])
+            pool_idx = torch.randint(0, goal_img.shape[0], (m,), device=self.device)
+            state_idx = torch.randint(0, obs.shape[0], (m,), device=self.device)
+            neg_loss = self.compositionality_loss_negation(obs[state_idx], goal_img[pool_idx], not_goal_img[pool_idx])
+            comp_loss = comp_loss + neg_loss
+            if log:
+                logger.logging_tool.log({
+                    'step': step,
+                    beginning + '/phi/compositionality_negation_loss': neg_loss.item(),
+                    beginning + '/phi/compositionality_k': k,
+                })
+
+        return comp_loss
 
     def encoder_loss(self, obs, action, next_obs, goal, reward, rtg, td, policy, step, log = True, beginning = 'train'):
         if self.on_policy_dynamics == 'probabilistic' and step > self.steps_till_on_policy:
@@ -333,6 +425,10 @@ class PairedStateGoal(nn.Module):
         #policy_decoder_loss = self.policy_decoder_loss(obs, action, next_obs, goal, reward, rtg, td, policy, step, beginning = beginning)
 
         total_loss = self.encoder_weight * encoder_loss + self.transition_weight * (transition_loss + decoder_loss)
+
+        if self.compositionality_weight > 0 and (self._comp_pool_minmax or self._comp_pool_neg):
+            comp_loss = self.compositionality_loss(obs, step, log = log, beginning = beginning)
+            total_loss = total_loss + self.compositionality_weight * comp_loss
 
         if log:
             stats = {'step' : step,
