@@ -197,6 +197,11 @@ class FourRoomsGoalEnv(gym.Env):
             success = self.env.state == self._goal_state()
         timeout = self._episode_step >= self._max_episode_steps
         reward = 1.0 if success else -0.01
+        if self.env.dense_rewards:
+            # GridWorld.step()'s own reward is discarded above (it's computed against
+            # the pre-transition state, one step out of phase with `success` here), so
+            # shape explicitly against the post-transition position instead.
+            reward += self.env._get_dense_reward(self.env.state, discrete_action)
 
         extra = {
             "state": self._state_array(),

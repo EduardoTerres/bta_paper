@@ -208,6 +208,14 @@ class GoalReplayBuffer(ReplayBuffer):
 
         return obses, actions, rewards, next_obses, not_dones, goals, kwargs
 
+    def sample_goal_pool(self, n):
+        """n distinct goal images sampled from the buffer, used as the fixed pool P for the
+        compositionality loss (see PairedStateGoal.compositionality_loss)."""
+        high = self.capacity if self.full else self.idx
+        idxs = np.random.choice(np.arange(self.sample_start, high), size=n, replace=False)
+        imgs = self.goals[idxs]
+        return torch.as_tensor(imgs, device=self.device).float().contiguous() / 255
+
     def sample_trajectory(self, fetch_states = False):
         #Try to sample one at a time as trajectories will have different lengths...
 

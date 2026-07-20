@@ -20,8 +20,9 @@ python offline_gcab_four_rooms_vision.py \
     --training-iterations 50000 \
     --eval-freq 200 \
     --log-freq 200 \
-    --seed 42 \
+    --seed 0 \
     --use-wandb \
-    --compositionality-weight 1 \
+    --compositionality-weight 2 \
+    --dense-rewards \
 
     # --train-multi-goal \

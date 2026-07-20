@@ -39,8 +39,9 @@ class PairedStateGoal(nn.Module):
             lr=1e-3,
             weight_decay = 0,
             ground_space = True,
-            compositionality_weight = 0.0,
-            compositionality_batch_size = 32):
+            lambda_comp = 1.0,
+            beta_comp = 1.0,
+            lambda_comp_warmup_steps = 10000):
         super().__init__()
 
         self.device = device
@@ -48,10 +49,27 @@ class PairedStateGoal(nn.Module):
         self.phi = self
 
         self.ground_space = ground_space
-        self.compositionality_weight = compositionality_weight
-        self.compositionality_batch_size = compositionality_batch_size
-        self._comp_pool_minmax = None
-        self._comp_pool_neg = None
+
+        # Boolean-algebra compositionality loss on phi (Nangue Tasse et al. 2020), enforced
+        # over Phi, a permutation-invariant set extension of phi -- see encode_set /
+        # compositionality_loss below.
+        self.lambda_comp = lambda_comp
+        self.beta_comp = beta_comp
+        self.lambda_comp_warmup_steps = lambda_comp_warmup_steps
+        self.comp_pool_size_range = (2, 8)
+
+        self.set_pool_mlp = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim),
+            nn.ReLU(),
+            nn.Linear(feature_dim, feature_dim)).to(self.device)
+        # Zero-init the last layer so Phi starts as a plain mean-pool (near-identity residual).
+        nn.init.zeros_(self.set_pool_mlp[-1].weight)
+        nn.init.zeros_(self.set_pool_mlp[-1].bias)
+
+        # Learned empty-set token: an image-shaped parameter fed through the same phi trunk
+        # as any other goal, so Phi(s, empty) and Gamma(empty) reuse the trunk exactly like a
+        # singleton goal would (sigmoid keeps it in the [0,1] range the encoder asserts on).
+        self.empty_token = nn.Parameter(torch.zeros(obs_shape, device=self.device))
 
         self.action_scale = action_scale
         self.decode_both = decode_both
@@ -120,7 +138,9 @@ class PairedStateGoal(nn.Module):
 
         
         try:
-            self.encoder_optimizer = torch.optim.AdamW(self.encoder.parameters(), lr=lr, weight_decay=weight_decay)
+            self.encoder_optimizer = torch.optim.AdamW(
+                list(self.encoder.parameters()) + list(self.set_pool_mlp.parameters()) + [self.empty_token],
+                lr=lr, weight_decay=weight_decay)
             self.decoder_optimizer = torch.optim.AdamW(list(self.decoder.parameters()) + list(self.dynamics_model.parameters()), lr=lr, weight_decay=weight_decay)
         except:
             raise NotImplementedError
@@ -148,87 +168,159 @@ class PairedStateGoal(nn.Module):
 
         return z_out
 
-    def set_compositionality_pool(self, minmax_pool, neg_pool = None):
-        """minmax_pool maps N -> (members, union, inter), members shape (S, N, 3, H, W);
-        enforces phi(s, g_1 u ... u g_N) ~ max_i phi(s, g_i) and
-        phi(s, g_1 n ... n g_N) ~ min_i phi(s, g_i). neg_pool maps subset-size k -> (goal,
-        not_goal); enforces phi(s, NOT g) ~ 1 - phi(s, g). Unlike the disabled psi version
-        (GoalBisim.compositionality_loss), these targets are all conditioned on a state s
-        -- see compositionality_loss, which pairs each pool entry with a random state from
-        the live training batch, since e.g. V(s, g1 u g2) = max(V(s,g1), V(s,g2)) is itself
-        a state-conditioned identity, not a pure-goal one."""
-        self._comp_pool_minmax = {
-            n: (members.to(self.device), union.to(self.device), inter.to(self.device))
-            for n, (members, union, inter) in minmax_pool.items()
-        } if minmax_pool else None
-        self._comp_pool_neg = {
-            k: (goal.to(self.device), not_goal.to(self.device))
-            for k, (goal, not_goal) in neg_pool.items()
-        } if neg_pool else None
+    def sample_compositionality_pool(self, replay_buffer):
+        """Draws one pool P of n ~ Uniform{2,...,8} goal images from the replay buffer, to
+        be held fixed across the whole training batch (Phi_U / Phi_empty are pool-relative,
+        so mixing pools within a batch would make the bounds hinge incoherent)."""
+        n = random.randint(*self.comp_pool_size_range)
+        return replay_buffer.sample_goal_pool(n).to(self.device)
 
-    def _grounded_encode(self, state, goal):
-        z = self.encode(state, goal)
-        if self.ground_space:
-            z = z - self.encode(goal, goal)
-        return z
+    def _pool_member_embeddings(self, state, pool_imgs):
+        """Raw (ungrounded, gradient-flowing) phi(s, g) for every g in the shared pool.
+        state: (B, C, H, W); pool_imgs: (n, C, H, W). Returns (B, n, d)."""
+        batch, n = state.shape[0], pool_imgs.shape[0]
+        state_rep = state.unsqueeze(1).expand(-1, n, *state.shape[1:]).reshape(batch * n, *state.shape[1:])
+        goal_rep = pool_imgs.unsqueeze(0).expand(batch, -1, *pool_imgs.shape[1:]).reshape(batch * n, *pool_imgs.shape[1:])
+        return self.encode(state_rep, goal_rep).reshape(batch, n, -1)
 
-    def compositionality_loss_minmax(self, obs, members, union_img, inter_img):
-        batch, n = members.shape[0], members.shape[1]
-        state_rep = obs.unsqueeze(1).expand(-1, n, *obs.shape[1:]).reshape(batch * n, *obs.shape[1:])
-        flat_members = members.reshape(batch * n, *members.shape[2:])
-        z_members = self._grounded_encode(state_rep, flat_members).reshape(batch, n, -1)
+    def _pool_grounding(self, pool_imgs):
+        """phi_bar(g, g) for every g in the pool -- always detached. (n, d)."""
+        with torch.no_grad():
+            return self.encode(pool_imgs, pool_imgs)
 
-        z_union = self._grounded_encode(obs, union_img)
-        z_inter = self._grounded_encode(obs, inter_img)
+    def _aggregate(self, z_members, mask):
+        """Phi(s, A) via mean-pool + residual MLP (DeepSets-style), given raw per-member
+        embeddings z_members (B, n, d) and a boolean membership mask (B, n) with >=1 True
+        per row. Exactly identity-on-singletons: singleton rows bypass the MLP entirely, so
+        Phi(s, {g}) == phi(s, g) holds numerically regardless of how set_pool_mlp is trained."""
+        mask_f = mask.float().unsqueeze(-1)
+        counts = mask_f.sum(dim=1).clamp(min=1)
+        mean = (z_members * mask_f).sum(dim=1) / counts
+        pooled = mean + self.set_pool_mlp(mean)
+        is_singleton = (mask.sum(dim=1) == 1).unsqueeze(-1)
+        return torch.where(is_singleton, mean, pooled)
 
-        union_loss = self.mse(z_union, z_members.max(dim=1).values)
-        inter_loss = self.mse(z_inter, z_members.min(dim=1).values)
-        return union_loss + inter_loss
+    def _aggregate_grounding(self, ground_members, mask):
+        """Gamma(A) = mean_{g in A} phi_bar(g, g). ground_members: (n, d), mask: (B, n)."""
+        mask_f = mask.float().unsqueeze(-1)
+        counts = mask_f.sum(dim=1).clamp(min=1)
+        ground_rep = ground_members.unsqueeze(0).expand(mask.shape[0], -1, -1)
+        return (ground_rep * mask_f).sum(dim=1) / counts
 
-    def compositionality_loss_negation(self, obs, goal_img, not_goal_img):
-        z_goal = self._grounded_encode(obs, goal_img)
-        z_not_goal = self._grounded_encode(obs, not_goal_img)
-        return self.mse(z_not_goal, 1 - z_goal)
+    def _phi_tilde(self, z_members, ground_members, mask):
+        """Phi~(s, A) = Phi(s, A) - Gamma(A), the grounded set embedding used everywhere
+        below (raw Phi has no canonical origin -- see L_psi, which grounds the same way)."""
+        return self._aggregate(z_members, mask) - self._aggregate_grounding(ground_members, mask)
 
-    def compositionality_loss(self, obs, step, log = True, beginning = 'train'):
-        """Draws one random min/max tuple and one random negation pair from the pools,
-        each paired with random states drawn from the live batch `obs` (a different
-        random state per pool entry, since the identity should hold for any state, not
-        just ones correlated with how the pool was built)."""
-        comp_loss = torch.zeros((), device=self.device)
+    def _empty_embedding(self, state):
+        """Phi(s, empty) -- the learned empty-set token, encoded through the same trunk as
+        any singleton goal."""
+        token_img = torch.sigmoid(self.empty_token).unsqueeze(0).expand(state.shape[0], *self.empty_token.shape)
+        return self.encode(state, token_img)
 
-        if self._comp_pool_minmax:
-            n = random.choice(list(self._comp_pool_minmax.keys()))
-            members, union_img, inter_img = self._comp_pool_minmax[n]
-            m = min(self.compositionality_batch_size, members.shape[0], obs.shape[0])
-            pool_idx = torch.randint(0, members.shape[0], (m,), device=self.device)
-            state_idx = torch.randint(0, obs.shape[0], (m,), device=self.device)
-            minmax_loss = self.compositionality_loss_minmax(
-                obs[state_idx], members[pool_idx], union_img[pool_idx], inter_img[pool_idx])
-            comp_loss = comp_loss + minmax_loss
-            if log:
-                logger.logging_tool.log({
-                    'step': step,
-                    beginning + '/phi/compositionality_minmax_loss': minmax_loss.item(),
-                    beginning + '/phi/compositionality_n': n,
-                })
+    def _empty_grounding(self, batch_size):
+        """Gamma(empty) = phi_bar(empty_token, empty_token) -- always detached."""
+        token_img = torch.sigmoid(self.empty_token).unsqueeze(0)
+        with torch.no_grad():
+            z = self.encode(token_img, token_img)
+        return z.expand(batch_size, -1)
 
-        if self._comp_pool_neg:
-            k = random.choice(list(self._comp_pool_neg.keys()))
-            goal_img, not_goal_img = self._comp_pool_neg[k]
-            m = min(self.compositionality_batch_size, goal_img.shape[0], obs.shape[0])
-            pool_idx = torch.randint(0, goal_img.shape[0], (m,), device=self.device)
-            state_idx = torch.randint(0, obs.shape[0], (m,), device=self.device)
-            neg_loss = self.compositionality_loss_negation(obs[state_idx], goal_img[pool_idx], not_goal_img[pool_idx])
-            comp_loss = comp_loss + neg_loss
-            if log:
-                logger.logging_tool.log({
-                    'step': step,
-                    beginning + '/phi/compositionality_negation_loss': neg_loss.item(),
-                    beginning + '/phi/compositionality_k': k,
-                })
+    def _phi_tilde_empty(self, state):
+        return self._empty_embedding(state) - self._empty_grounding(state.shape[0])
 
-        return comp_loss
+    def _sample_overlapping_subsets(self, batch_size, n):
+        """Sample A, B subseteq {0,...,n-1} (as boolean masks) with A ∩ B != {} guaranteed
+        by construction: a shared core (>=1 element) plus disjoint private extras. Sampling
+        A and B independently would almost surely yield disjoint sets for small pools, which
+        degenerates the intersection term into a no-op."""
+        idx_all = np.arange(n)
+        mask_a = np.zeros((batch_size, n), dtype=bool)
+        mask_b = np.zeros((batch_size, n), dtype=bool)
+        for i in range(batch_size):
+            core_size = np.random.randint(1, n + 1)
+            core = np.random.choice(idx_all, size=core_size, replace=False)
+            remaining = np.setdiff1d(idx_all, core)
+            assign = np.random.randint(0, 3, size=remaining.shape[0])  # 0=neither, 1=A-only, 2=B-only
+            mask_a[i, core] = True
+            mask_a[i, remaining[assign == 1]] = True
+            mask_b[i, core] = True
+            mask_b[i, remaining[assign == 2]] = True
+        return (torch.as_tensor(mask_a, device=self.device),
+                torch.as_tensor(mask_b, device=self.device))
+
+    def _sq_norm_mean(self, x):
+        return x.pow(2).sum(dim=-1).mean()
+
+    def compositionality_loss(self, state, pool_imgs, step, log = True, beginning = 'train'):
+        """Boolean-algebra loss on Phi~ (Nangue Tasse et al. 2020): union/intersection via
+        coordinatewise max/min, negation via the sum-minus-target form, plus a bounds hinge
+        enforcing Phi~_empty <= Phi~(s,A) <= Phi~_U. Every target is detached; gradient only
+        flows into the composite (LHS) branch -- see module docstring notes at call site."""
+        n, batch = pool_imgs.shape[0], state.shape[0]
+        mask_a, mask_b = self._sample_overlapping_subsets(batch, n)
+        mask_u = torch.ones_like(mask_a)
+
+        # Phi~(s, X) for every goal set X we need, each aggregated over the *same* shared
+        # pool via the membership masks above -- this is what makes the terms below directly
+        # comparable (they all live in the same pool-relative, grounded embedding space).
+        z_members = self._pool_member_embeddings(state, pool_imgs)
+        ground_members = self._pool_grounding(pool_imgs)
+
+        phi_AuB = self._phi_tilde(z_members, ground_members, mask_a | mask_b)   # Phi~(s, A ∪ B), composite (gradient-flowing) branch
+        phi_AnB = self._phi_tilde(z_members, ground_members, mask_a & mask_b)   # Phi~(s, A ∩ B), composite branch
+        phi_notA = self._phi_tilde(z_members, ground_members, ~mask_a)          # Phi~(s, ¬A) = Phi~(s, pool \ A), composite branch
+        phi_U = self._phi_tilde(z_members, ground_members, mask_u)              # Phi~(s, U), the full pool as the "universe" set
+        phi_empty = self._phi_tilde_empty(state)                                # Phi~(s, ∅) via the learned empty-set token
+
+        # Targets (RHS of each Boolean identity) are always computed from detached
+        # embeddings of the *primitive* sets A, B, U, ∅ -- only the composite set on the
+        # LHS above gets gradient, so these losses shape how A ∪ B / A ∩ B / ¬A relate to
+        # their operands without also dragging the operands themselves around.
+        z_members_det = z_members.detach()
+        phi_A_det = self._phi_tilde(z_members_det, ground_members, mask_a)      # Phi~(s, A), target-side
+        phi_B_det = self._phi_tilde(z_members_det, ground_members, mask_b)      # Phi~(s, B), target-side
+        phi_U_det = phi_U.detach()
+        phi_empty_det = phi_empty.detach()
+
+        # Coordinatewise max/min over sampled A, B enforce the lattice-join/meet identities
+        # for union/intersection (Nangue Tasse et al. 2020): Phi~(A∪B) == max(Phi~A, Phi~B),
+        # Phi~(A∩B) == min(Phi~A, Phi~B).
+        union_term = self._sq_norm_mean(phi_AuB - torch.maximum(phi_A_det, phi_B_det))
+        inter_term = self._sq_norm_mean(phi_AnB - torch.minimum(phi_A_det, phi_B_det))
+        # Complement identity: Phi~(¬A) == Phi~(U) + Phi~(∅) - Phi~(A), sampled once per A.
+        negation_term = self._sq_norm_mean(phi_notA - (phi_U_det + phi_empty_det - phi_A_det))
+
+        # Bounds hinge: for every sampled A, Phi~(A) must sit between the empty-set and
+        # universal-set embeddings (Phi~_empty <= Phi~(s,A) <= Phi~_U); only violations
+        # (positive relu) are penalized.
+        hinge_upper = F.relu(phi_A_det - phi_U)
+        hinge_lower = F.relu(phi_empty - phi_A_det)
+        bounds_hinge_term = self._sq_norm_mean(hinge_upper) + self._sq_norm_mean(hinge_lower)
+
+        comp_loss = union_term + inter_term + negation_term + self.beta_comp * bounds_hinge_term
+        lambda_current = self.lambda_comp * min(1.0, step / max(1, self.lambda_comp_warmup_steps))
+
+        if log:
+            with torch.no_grad():
+                spread = (phi_A_det - phi_B_det).norm(dim=-1).mean()
+                goal_point_var = ground_members.var(dim=0).mean()
+                bound_violation_frac = ((phi_A_det < phi_empty) | (phi_A_det > phi_U)).float().mean()
+            logger.logging_tool.log({
+                'step': step,
+                beginning + '/comp/union': union_term.item(),
+                beginning + '/comp/intersect': inter_term.item(),
+                beginning + '/comp/negation': negation_term.item(),
+                beginning + '/comp/bounds_hinge': bounds_hinge_term.item(),
+                beginning + '/comp/lambda_current': lambda_current,
+                beginning + '/comp/spread': spread.item(),
+                beginning + '/comp/goal_point_var': goal_point_var.item(),
+                beginning + '/comp/bound_violation_frac': bound_violation_frac.item(),
+                beginning + '/comp/norm_Phi_U': phi_U_det.norm(dim=-1).mean().item(),
+                beginning + '/comp/norm_Phi_empty': phi_empty_det.norm(dim=-1).mean().item(),
+                beginning + '/comp/norm_Phi_A': phi_A_det.norm(dim=-1).mean().item(),
+            })
+
+        return comp_loss, lambda_current
 
     def encoder_loss(self, obs, action, next_obs, goal, reward, rtg, td, policy, step, log = True, beginning = 'train'):
         if self.on_policy_dynamics == 'probabilistic' and step > self.steps_till_on_policy:
@@ -413,7 +505,7 @@ class PairedStateGoal(nn.Module):
 
         return decoder_loss
 
-    def train_batch(self, obs, action, next_obs, goal, reward, rtg, td, policy, step, log = True, take_step = True, beginning = 'train'):
+    def train_batch(self, obs, action, next_obs, goal, reward, rtg, td, policy, step, log = True, take_step = True, beginning = 'train', comp_pool_imgs = None):
 
         action = torch.clip(action, min = -1, max = 1) * self.action_scale
 
@@ -426,9 +518,10 @@ class PairedStateGoal(nn.Module):
 
         total_loss = self.encoder_weight * encoder_loss + self.transition_weight * (transition_loss + decoder_loss)
 
-        if self.compositionality_weight > 0 and (self._comp_pool_minmax or self._comp_pool_neg):
-            comp_loss = self.compositionality_loss(obs, step, log = log, beginning = beginning)
-            total_loss = total_loss + self.compositionality_weight * comp_loss
+        # Didnt work
+        # if self.lambda_comp > 0 and comp_pool_imgs is not None:
+        #     comp_loss, lambda_current = self.compositionality_loss(obs, comp_pool_imgs, step, log = log, beginning = beginning)
+        #     total_loss = total_loss + lambda_current * comp_loss
 
         if log:
             stats = {'step' : step,
@@ -480,20 +573,23 @@ class PairedStateGoal(nn.Module):
         self.decoder_optimizer_step.step()
 
     def eval_loss(self, replay_buffer, policy, kwargs, step, log = True):
+        comp_pool_imgs = self.sample_compositionality_pool(replay_buffer) if self.lambda_comp > 0 else None
         self.train_batch(kwargs['obs'], kwargs['action'], kwargs['next_obs'], kwargs['goal'], kwargs['reward'], \
-            kwargs['rtg'], kwargs['td'], policy, step, log = log, take_step = False, beginning = 'eval')
+            kwargs['rtg'], kwargs['td'], policy, step, log = log, take_step = False, beginning = 'eval', comp_pool_imgs = comp_pool_imgs)
 
     def update(self, replay_buffer, policy, kwargs, step, log = True):
         #Will run through dataset...
 
          #Does it matter if not same batch....?
 
+        comp_pool_imgs = self.sample_compositionality_pool(replay_buffer) if self.lambda_comp > 0 else None
         self.train_batch(kwargs['obs'], kwargs['action'], kwargs['next_obs'], kwargs['goal'], \
-            kwargs['reward'], kwargs['rtg'], kwargs['td'], policy, step, log = log)
+            kwargs['reward'], kwargs['rtg'], kwargs['td'], policy, step, log = log, comp_pool_imgs = comp_pool_imgs)
 
         for _ in range(self.train_iters_per_update - 1):
             obs, action, _, reward, next_obs, not_done, goals, kwargs = replay_buffer.sample()
-            self.train_batch(obs, action, next_obs, goals, reward, kwargs['rtg'], kwargs['td'], policy, step, log = log)
+            comp_pool_imgs = self.sample_compositionality_pool(replay_buffer) if self.lambda_comp > 0 else None
+            self.train_batch(obs, action, next_obs, goals, reward, kwargs['rtg'], kwargs['td'], policy, step, log = log, comp_pool_imgs = comp_pool_imgs)
 
 
 

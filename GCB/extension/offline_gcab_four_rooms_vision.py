@@ -153,6 +153,7 @@ def collect_four_rooms_replay(details, save_path, num_steps):
 def build_variant(args):
     goal_mode = "multigoal" if args.train_multi_goal else "singlegoal"
     dataset_suffix = "_multigoal" if args.train_multi_goal else ""
+    dataset_suffix += "_dense" if args.dense_rewards else ""
     dataset_loc = args.dataset_loc or f"replay_four_rooms_{args.num_rooms}{dataset_suffix}.pt"
     return dict(
         training_form="dataset",
@@ -165,7 +166,7 @@ def build_variant(args):
                 num_rooms=args.num_rooms,
                 max_episode_steps=args.max_episode_steps,
                 obs_img_dim=64,
-                dense_rewards=False,
+                dense_rewards=args.dense_rewards,
                 slip_prob=0.0,
             ),
             frame_stack_count=1,
@@ -206,7 +207,7 @@ def build_variant(args):
             dual_optimization=False,
             steps_till_on_policy=0,
             phi_updates_before_psi=0,
-            compositionality_weight=args.compositionality_weight,
+            lambda_comp=args.compositionality_weight,
         ),
         training_transforms=[],
         eval_transforms=[],
@@ -251,8 +252,8 @@ def build_variant(args):
         save_wandb_video=False,
         device=args.device,
         project_name="gcb-four-rooms",
-        group=f"GCRB_four_rooms_{args.num_rooms}_{goal_mode}_iters{args.training_iterations}_compw{args.compositionality_weight}",
-        name=f"gcb-rooms-{args.num_rooms}_{goal_mode}_iters{args.training_iterations}_compw{args.compositionality_weight}",
+        group=f"GCRB_four_rooms_{args.num_rooms}_{goal_mode}_iters{args.training_iterations}_compw{args.compositionality_weight}{dataset_suffix}",
+        name=f"gcb-rooms-{args.num_rooms}_{goal_mode}_iters{args.training_iterations}_compw{args.compositionality_weight}{dataset_suffix}",
     )
 
 
@@ -267,6 +268,12 @@ if __name__ == "__main__":
     parser.add_argument("--log-freq", type=int, default=100,
                          help="How often (in steps) to push training losses to W&B")
     parser.add_argument("--max-episode-steps", type=int, default=75)
+    parser.add_argument("--dense-rewards", action="store_true",
+                         help="Shape reward with a Gaussian bump on distance-to-goal "
+                              "(GridWorld._get_dense_reward) on top of the terminal "
+                              "+1.0/-0.01, instead of the terminal reward alone. Baked "
+                              "into the dataset at collection time, so this also changes "
+                              "the default --dataset-loc (adds a _dense suffix)")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--use-wandb", action="store_true")
     parser.add_argument("--no-collect", action="store_true")
@@ -275,10 +282,9 @@ if __name__ == "__main__":
                               "eval's evaluate_joint_goal_agent (env.reset_joint), instead of "
                               "only single-goal episodes")
     parser.add_argument("--compositionality-weight", type=float, default=0.0,
-                         help="Weight on the auxiliary loss enforcing "
-                              "psi(g1 & g2) ~= min(psi(g1), psi(g2)) and "
-                              "psi(g1 | g2) ~= max(psi(g1), psi(g2)) over randomly sampled "
-                              "goal-set pairs. 0 disables it (default)")
+                         help="Weight on the phi-only Boolean-algebra compositionality loss "
+                              "(union/intersection/negation/bounds over the set encoder Phi). "
+                              "0 disables it (default)")
     parser.add_argument("--seed", type=int, default=None,
                          help="Seed for reproducibility; random if unset")
     args = parser.parse_args()

@@ -28,9 +28,6 @@ JOINT_EVAL_SEED = 42
 JOINT_EVAL_MAX_SETS = 5
 JOINT_EVAL_EPISODES = 5
 
-COMPOSITIONALITY_SEED = 43
-COMPOSITIONALITY_SAMPLES_PER_N = 16
-
 
 def _sample_joint_goal_sets(goal_positions):
     """For N=2..len(goal_positions), fix (once, via a constant seed independent of the
@@ -43,71 +40,6 @@ def _sample_joint_goal_sets(goal_positions):
         rng.shuffle(combos)
         goal_sets[n] = combos[:JOINT_EVAL_MAX_SETS]
     return goal_sets
-
-
-def _sample_compositionality_tuples(env, goal_positions, samples_per_n=COMPOSITIONALITY_SAMPLES_PER_N,
-                                     min_n=2, max_n=None, seed=COMPOSITIONALITY_SEED):
-    """Fix (once, via a constant seed) a pool of N-goal tuples for N=min_n..max_n. Each
-    `member` is a region (position set) built from a shared, randomly sized `core` plus
-    distinct extra cells, so intersection(members) == core is guaranteed non-empty and
-    varies per sample -- unlike intersecting N distinct singleton goals, which is always
-    empty. Paired at train time with a live state s (see PairedStateGoal.compositionality_loss)
-    to train phi(s, g_1 ∪ ... ∪ g_N) ≈ max_i phi(s, g_i) and
-    phi(s, g_1 ∩ ... ∩ g_N) ≈ min_i phi(s, g_i)."""
-    rng = random.Random(seed)
-    goal_positions = [tuple(p) for p in goal_positions]
-    max_n = max_n or len(goal_positions)
-
-    pool = {}
-    for n in range(min_n, max_n + 1):
-        member_imgs, union_imgs, inter_imgs = [], [], []
-        for _ in range(samples_per_n):
-            core_size = rng.randint(1, max(1, len(goal_positions) - n))
-            core = set(rng.sample(goal_positions, core_size))
-            remaining = [p for p in goal_positions if p not in core]
-            members = []
-            for _ in range(n):
-                extra = set(rng.sample(remaining, rng.randint(0, len(remaining))))
-                members.append(core | extra)
-            member_imgs.append([env.render_goal_set(m) for m in members])
-            union_imgs.append(env.render_goal_set(set.union(*members)))
-            inter_imgs.append(env.render_goal_set(set.intersection(*members)))
-
-        # Encoders assert inputs lie in [0, 1] (replay buffer samples are normalized the
-        # same way via `.float() / 255`, see goalreplaybuffer.py), so normalize here too.
-        members_t = torch.as_tensor(np.array(member_imgs), dtype=torch.float32) / 255  # (S, N, 3, H, W)
-        union_t = torch.as_tensor(np.stack(union_imgs), dtype=torch.float32) / 255
-        inter_t = torch.as_tensor(np.stack(inter_imgs), dtype=torch.float32) / 255
-        pool[n] = (members_t, union_t, inter_t)
-
-    return pool
-
-
-def _sample_negation_pairs(env, goal_positions, samples_per_size=COMPOSITIONALITY_SAMPLES_PER_N,
-                            seed=COMPOSITIONALITY_SEED + 1):
-    """Fix (once, via a constant seed) a pool of (goal_set, NOT goal_set) pairs across
-    every subset size k=1..len(goal_positions)-1 -- varying sizes, rather than only ever
-    negating singletons -- where NOT goal_set := goal_positions \\ goal_set, guaranteed
-    non-empty on both sides since 1 <= k <= len(goal_positions) - 1. Paired at train time
-    with a live state s to train phi(s, NOT g) ≈ 1 - phi(s, g)."""
-    rng = random.Random(seed)
-    goal_positions = [tuple(p) for p in goal_positions]
-    total = len(goal_positions)
-
-    pool = {}
-    for k in range(1, total):
-        goal_imgs, not_goal_imgs = [], []
-        for _ in range(samples_per_size):
-            subset = set(rng.sample(goal_positions, k))
-            complement = set(goal_positions) - subset
-            goal_imgs.append(env.render_goal_set(subset))
-            not_goal_imgs.append(env.render_goal_set(complement))
-
-        goal_t = torch.as_tensor(np.stack(goal_imgs), dtype=torch.float32) / 255
-        not_goal_t = torch.as_tensor(np.stack(not_goal_imgs), dtype=torch.float32) / 255
-        pool[k] = (goal_t, not_goal_t)
-
-    return pool
 
 
 def train_representation_offline(details):
@@ -124,13 +56,6 @@ def train_representation_offline(details):
     eval_env = load_env(details)
 
     joint_goal_sets = _sample_joint_goal_sets(eval_env.goal_positions) if hasattr(eval_env, 'goal_positions') else {}
-
-    compositionality_weight = details.get('goalbisim_kwargs', {}).get('compositionality_weight', 0.0)
-    compositionality_minmax_pool = None
-    compositionality_neg_pool = None
-    if compositionality_weight > 0 and hasattr(eval_env, 'goal_positions'):
-        compositionality_minmax_pool = _sample_compositionality_tuples(eval_env, eval_env.goal_positions)
-        compositionality_neg_pool = _sample_negation_pairs(eval_env, eval_env.goal_positions)
 
     device = torch.device(details['device'])
 
@@ -173,9 +98,6 @@ def train_representation_offline(details):
     best_critic_representation = initialize_representation(env.observation_space.shape, env.action_space.shape, device, details, main = True)
     best_actor_representation = initialize_representation(env.observation_space.shape, env.action_space.shape, device, details)
     best_target_critic_representation = initialize_representation(env.observation_space.shape, env.action_space.shape, device, details)
-
-    if compositionality_minmax_pool is not None:
-        critic_representation.set_compositionality_pool(compositionality_minmax_pool, compositionality_neg_pool)
 
     if details['add_her_relabels']:
         replay_buffer.relabel()

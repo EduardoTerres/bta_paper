@@ -1,4 +1,3 @@
-import random
 import torch
 import torch.nn as nn
 from goalbisim.representation.encoders.RADencoder import PixelEncoder
@@ -50,8 +49,9 @@ class GoalBisim(nn.Module):
             num_filters_paired = 32,
             lr_paired=1e-3,
             weight_decay_paired = 0,
-            compositionality_weight = 0.0,
-            compositionality_batch_size = 32):
+            lambda_comp = 1.0,
+            beta_comp = 1.0,
+            lambda_comp_warmup_steps = 10000):
         super().__init__()
 
         self.using_phi = using_phi
@@ -60,15 +60,6 @@ class GoalBisim(nn.Module):
         self.encoder = self.psi
         self.feature_dim = feature_dim
         #self.device = device
-
-        # Min/max/negation compositionality is enforced on psi directly (state-only, no
-        # grounding) *and* on phi (state-conditioned, grounded -- see PairedStateGoal).
-        # Re-enabled alongside phi's version; see compositionality_loss below for why
-        # these are consistent rather than competing targets.
-        self.compositionality_weight = compositionality_weight
-        self.compositionality_batch_size = compositionality_batch_size
-        self._comp_pool = None
-        self._comp_pool_neg = None
 
         self.disconnect_psi = disconnect_psi
 
@@ -89,7 +80,7 @@ class GoalBisim(nn.Module):
                 metric_loss = metric_loss, train_iters_per_update = train_iters_per_update_phi, num_filters = num_filters_paired, lr=lr_paired, \
                 action_shape = action_shape, on_policy_dynamics = on_policy_dynamics, action_weight = action_weight, steps_till_on_policy = steps_till_on_policy, \
                 action_scale = action_scale, output_logits = output_logits_paired, weight_decay = weight_decay_paired,  encoder_weight = encoder_weight, transition_weight = transition_weight, \
-                ground_space = ground_space, compositionality_weight = compositionality_weight, compositionality_batch_size = compositionality_batch_size)
+                ground_space = ground_space, lambda_comp = lambda_comp, beta_comp = beta_comp, lambda_comp_warmup_steps = lambda_comp_warmup_steps)
             try:
                 self.psi_optimizer = torch.optim.AdamW(self.psi.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -171,18 +162,23 @@ class GoalBisim(nn.Module):
         else:
             raise NotImplementedError        
 
-        if self.use_contrastive:  
-            contrastive_loss = self.contrastive_weight * self.temporal_contrastive_loss(obs, next_obs)    
+        if self.use_contrastive:
+            contrastive_loss = self.contrastive_weight * self.temporal_contrastive_loss(obs, next_obs)
             loss = delta_loss + contrastive_loss
             stats = {'step' : step,
             beginning + '/psi/delta_loss' : delta_loss.item(),
             beginning + '/psi/contrastive_loss' : contrastive_loss.item()
-             } 
+             }
         else:
             loss = delta_loss
             stats = {'step' : step,
             beginning + '/psi/delta_loss' : delta_loss.item()
-             } 
+             }
+
+        # delta_loss is the L_psi residual; logged again here under comp/ so it's easy to
+        # compare against the phi compositionality metrics and see whether psi is inheriting
+        # the algebraic structure Phi is being trained to have, or lagging behind it.
+        stats[beginning + '/comp/psi_inherit_err'] = delta_loss.item()
 
         logger.logging_tool.log(stats)
 
@@ -204,71 +200,10 @@ class GoalBisim(nn.Module):
 
         return loss
 
-    def set_compositionality_pool(self, minmax_pool, neg_pool = None):
-        """Forwards both pools to phi (state-conditioned, grounded -- see
-        PairedStateGoal.set_compositionality_pool) *and* keeps copies for psi's own
-        direct, unconditioned versions below (compositionality_loss / _negation)."""
-        self._comp_pool = {
-            n: (members.to(self.device), union.to(self.device), inter.to(self.device))
-            for n, (members, union, inter) in minmax_pool.items()
-        }
-        self._comp_pool_neg = {
-            k: (goal.to(self.device), not_goal.to(self.device))
-            for k, (goal, not_goal) in neg_pool.items()
-        } if neg_pool else None
-        self.phi.set_compositionality_pool(minmax_pool, neg_pool)
-
-    def compositionality_loss(self, members, union_img, inter_img):
-        batch, n = members.shape[0], members.shape[1]
-        flat_members = members.reshape(batch * n, *members.shape[2:])
-        z_members = self.encode(flat_members).reshape(batch, n, -1)
-        z_union_target = z_members.max(dim=1).values
-        z_inter_target = z_members.min(dim=1).values
-
-        z_union = self.encode(union_img)
-        z_inter = self.encode(inter_img)
-
-        union_loss = self.mse(z_union, z_union_target)
-        inter_loss = self.mse(z_inter, z_inter_target)
-        return inter_loss + union_loss
-
-    def compositionality_loss_negation(self, goal_img, not_goal_img):
-        z_goal = self.encode(goal_img)
-        z_not_goal = self.encode(not_goal_img)
-        return self.mse(z_not_goal, 1 - z_goal)
-
     def train_batch(self, obs, action, next_obs, goal, reward, policy, step, log = True, take_step = True, beginning = 'train'):
 
         #self.model.train()
         loss = self.loss(obs, action, next_obs, goal, reward, policy, step, log = log, beginning = beginning)
-
-        if self.compositionality_weight > 0 and self._comp_pool:
-            n = random.choice(list(self._comp_pool.keys()))
-            members, union_img, inter_img = self._comp_pool[n]
-            pool_size = members.shape[0]
-            idx = torch.randint(0, pool_size, (min(self.compositionality_batch_size, pool_size),), device=self.device)
-            comp_loss = self.compositionality_loss(members[idx], union_img[idx], inter_img[idx])
-            loss = loss + self.compositionality_weight * comp_loss
-
-            logger.logging_tool.log({
-                'step': step,
-                beginning + '/psi/compositionality_loss': comp_loss.item(),
-                beginning + '/psi/compositionality_n': n,
-            })
-
-        if self.compositionality_weight > 0 and self._comp_pool_neg:
-            k = random.choice(list(self._comp_pool_neg.keys()))
-            goal_img, not_goal_img = self._comp_pool_neg[k]
-            pool_size = goal_img.shape[0]
-            idx = torch.randint(0, pool_size, (min(self.compositionality_batch_size, pool_size),), device=self.device)
-            neg_loss = self.compositionality_loss_negation(goal_img[idx], not_goal_img[idx])
-            loss = loss + self.compositionality_weight * neg_loss
-
-            logger.logging_tool.log({
-                'step': step,
-                beginning + '/psi/compositionality_negation_loss': neg_loss.item(),
-                beginning + '/psi/compositionality_k': k,
-            })
 
         stats = {'step' : step,
         beginning + '/psi/loss' : loss.item()
