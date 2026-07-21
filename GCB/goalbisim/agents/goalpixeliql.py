@@ -46,7 +46,10 @@ class GoalPixelIQLAgent(nn.Module):
         detach_conv = False,
         analogy_goal = False,
         use_adamw = False,
-        phi_config = 'psi'
+        phi_config = 'psi',
+        lambda_haus = 0.0,
+        L_haus = 1.0,
+        lambda_haus_warmup_steps = 10000,
     ):
         super().__init__()
         self.device = device
@@ -61,6 +64,14 @@ class GoalPixelIQLAgent(nn.Module):
         self.clip_score = clip_score
         self.analogy_goal = analogy_goal
         self.phi_config = phi_config
+
+        # Hausdorff-Lipschitz regularizer: ties the composed goal-set Q-function (Q(s,H,a) =
+        # max_{g in H} Q(s,g,a), trained only on singleton goals via the Bellman/AWR losses
+        # above) to the geometry of the compositional phi representation, so composed-Q
+        # stays consistent across unseen goal sets at test time. Off by default (lambda_haus=0).
+        self.lambda_haus = lambda_haus
+        self.L_haus = L_haus
+        self.lambda_haus_warmup_steps = lambda_haus_warmup_steps
 
         self.q_update_period = q_update_period
         self.target_update_period = target_update_period
@@ -226,7 +237,68 @@ class GoalPixelIQLAgent(nn.Module):
             )
             return mu, std, dist        
 
-    def IQL_update(self, obs, goals, action, reward, next_obs, not_done, step, critic_gradients_allowed = True, init_obs=None):
+    @staticmethod
+    def _hausdorff_distance(z_members, mask_h, mask_k):
+        """d_H({z(g): g in H}, {z(h): h in K}) per batch row, brute-forced over pairwise
+        distances since the pool is tiny (<=8 members): sup_{x in H} inf_{y in K} d(x,y),
+        symmetrized with the H/K roles swapped, then maxed. z_members: (B, n, d);
+        mask_h, mask_k: (B, n) boolean."""
+        dist = torch.cdist(z_members, z_members)  # (B, n, n), dist[:, j, k] = ||z_j - z_k||
+
+        dist_for_k = dist.masked_fill(~mask_k.unsqueeze(1), float('inf'))
+        inf_over_k = dist_for_k.min(dim=2).values  # (B, n), indexed by x = row j in H
+        sup_h_to_k = inf_over_k.masked_fill(~mask_h, float('-inf')).max(dim=1).values
+
+        dist_for_h = dist.masked_fill(~mask_h.unsqueeze(2), float('inf'))
+        inf_over_h = dist_for_h.min(dim=1).values  # (B, n), indexed by y = column k in K
+        sup_k_to_h = inf_over_h.masked_fill(~mask_k, float('-inf')).max(dim=1).values
+
+        return torch.maximum(sup_h_to_k, sup_k_to_h)
+
+    def hausdorff_loss(self, obs, action, replay_buffer, step, detach_encoder=False, detach_all=False, log=True):
+        """L_Haus: regularizes the composed Q(s,H,a) = max_{g in H} Q(s,g,a) (trained only
+        on singleton-goal Bellman targets) to vary with H,K no faster than L_haus times the
+        Hausdorff distance between H and K in the (detached) compositional phi representation
+        -- a fixed target, so the encoder can't cheat by inflating latent distances. Only the
+        composed-Q branch carries gradient."""
+        # critic_representation is the GoalBisim wrapper; the compositionality/pool machinery
+        # (and the phi encoder the Hausdorff geometry is measured in) lives on its .phi
+        # (a PairedStateGoal instance) -- same object goalpixeliql already reaches into for
+        # `critic_representation.phi.encoder` above.
+        phi_module = self.critic_representation.phi
+        pool_imgs = phi_module.sample_compositionality_pool(replay_buffer)
+        batch, n = obs.shape[0], pool_imgs.shape[0]
+        mask_h, mask_k = phi_module._sample_overlapping_subsets(batch, n)
+
+        with torch.no_grad():
+            z_members = phi_module._pool_member_embeddings(obs, pool_imgs)
+            ground_members = phi_module._pool_grounding(pool_imgs)
+            z_tilde = z_members - ground_members.unsqueeze(0)
+            d_phi = self._hausdorff_distance(z_tilde, mask_h, mask_k)
+
+        Q_H = self.critic.forward_composed(obs, pool_imgs, mask_h, action, detach_encoder=detach_encoder, detach_all=detach_all)
+        Q_K = self.critic.forward_composed(obs, pool_imgs, mask_k, action, detach_encoder=detach_encoder, detach_all=detach_all)
+
+        margin = (Q_H - Q_K).abs().squeeze(-1) - self.L_haus * d_phi
+        haus_loss = F.relu(margin).pow(2).mean()
+        lambda_current = self.lambda_haus * min(1.0, step / max(1, self.lambda_haus_warmup_steps))
+
+        if log:
+            with torch.no_grad():
+                stats = {
+                    'train_step': step,
+                    'train/haus/loss': haus_loss.item(),
+                    'train/haus/lambda_current': lambda_current,
+                    'train/haus/d_phi_mean': d_phi.mean().item(),
+                    'train/haus/Q_H_mean': Q_H.mean().item(),
+                    'train/haus/Q_K_mean': Q_K.mean().item(),
+                    'train/haus/margin_violation_frac': (margin > 0).float().mean().item(),
+                }
+            logger.logging_tool.log(stats)
+
+        return haus_loss, lambda_current
+
+    def IQL_update(self, obs, goals, action, reward, next_obs, not_done, step, critic_gradients_allowed = True, init_obs=None, replay_buffer=None):
 
         #IQL Q Update
 
@@ -258,6 +330,13 @@ class GoalPixelIQLAgent(nn.Module):
         Vf_loss = (vf_weight * (Vf_error ** 2)).mean()
 
         critic_loss = Q_critic_loss + Vf_loss
+
+        if self.lambda_haus > 0 and replay_buffer is not None:
+            haus_loss, lambda_haus_current = self.hausdorff_loss(
+                obs, action, replay_buffer, step,
+                detach_encoder=self.detach_conv, detach_all=self.detach_encoder,
+            )
+            critic_loss = critic_loss + lambda_haus_current * haus_loss
 
         policy_logpp = dist.log_prob(action)
 
@@ -311,9 +390,9 @@ class GoalPixelIQLAgent(nn.Module):
         if self.analogy_goal:
             kwargs['analogy_obs'] = kwargs['analogy_obses']
             kwargs['analogy_goals'] = kwargs['analogy_goals']
-            self.IQL_update(obs, [kwargs['analogy_obses'], kwargs['analogy_goals']], action, reward, next_obs, not_done, step, init_obs=kwargs.get('init_obs', None))
+            self.IQL_update(obs, [kwargs['analogy_obses'], kwargs['analogy_goals']], action, reward, next_obs, not_done, step, init_obs=kwargs.get('init_obs', None), replay_buffer=replay_buffer)
         else:
-            self.IQL_update(obs, goals, action, reward, next_obs, not_done, step, init_obs=kwargs.get('init_obs', None))
+            self.IQL_update(obs, goals, action, reward, next_obs, not_done, step, init_obs=kwargs.get('init_obs', None), replay_buffer=replay_buffer)
         self.critic_representation.update(replay_buffer, self, kwargs, step) #Important to pass in policy!
 
         if step % self.target_update_period == 0:
@@ -381,7 +460,7 @@ class GoalPixelIQLAgent(nn.Module):
         kwargs['td'] = None
         kwargs['goal'] = goals
 
-        self.IQL_update(obs, goals, action, reward, next_obs, not_done, step, critic_gradients_allowed = critic_gradients_allowed, init_obs=kwargs.get('init_obs', None))
+        self.IQL_update(obs, goals, action, reward, next_obs, not_done, step, critic_gradients_allowed = critic_gradients_allowed, init_obs=kwargs.get('init_obs', None), replay_buffer=replay_buffer)
 
         if step % self.target_update_period == 0:
             soft_update_params(

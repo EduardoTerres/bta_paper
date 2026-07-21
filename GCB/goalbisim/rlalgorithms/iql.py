@@ -220,10 +220,28 @@ class GoalCriticIQL(Critic): #Basically same critic as SAC, but has a value func
 
         q1 = self.Q1(q_input, action)
         q2 = self.Q2(q_input, action)
-        
+
 
         self.outputs['q1'] = q1
         self.outputs['q2'] = q2
         #self.outputs['v'] = v
 
         return q1, q2
+
+    def forward_composed(self, obs, pool_imgs, mask, action, detach_encoder=False, detach_all=False):
+        """Q_theta(s, X, a) = max_{g in X} Q(s, g, a) for goal set X given as a boolean mask
+        over pool_imgs (n candidate goal images shared across the batch). Only ever trained
+        on singleton goals via `forward` above -- this composes those singleton predictions
+        at goal-set granularity, e.g. for the zero-shot Hausdorff-Lipschitz regularizer that
+        ties composed-Q consistency to the geometry of the (separately trained) compositional
+        goal representation. Per-member value uses min(Q1, Q2), the same twin-critic
+        pessimism IQL already uses for its advantage/V targets, before taking the max over X."""
+        batch, n = obs.shape[0], pool_imgs.shape[0]
+        obs_rep = obs.unsqueeze(1).expand(-1, n, *obs.shape[1:]).reshape(batch * n, *obs.shape[1:])
+        goal_rep = pool_imgs.unsqueeze(0).expand(batch, -1, *pool_imgs.shape[1:]).reshape(batch * n, *pool_imgs.shape[1:])
+        action_rep = action.unsqueeze(1).expand(-1, n, *action.shape[1:]).reshape(batch * n, *action.shape[1:])
+
+        q1, q2 = self.forward(obs_rep, goal_rep, action_rep, detach_encoder=detach_encoder, detach_all=detach_all)
+        q_min = torch.min(q1, q2).reshape(batch, n)
+        q_min = q_min.masked_fill(~mask, float('-inf'))
+        return q_min.max(dim=1, keepdim=True).values

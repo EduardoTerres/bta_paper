@@ -152,6 +152,7 @@ def collect_four_rooms_replay(details, save_path, num_steps):
 
 def build_variant(args):
     goal_mode = "multigoal" if args.train_multi_goal else "singlegoal"
+    reward_mode = "dense" if args.dense_rewards else "sparse"
     dataset_suffix = "_multigoal" if args.train_multi_goal else ""
     dataset_suffix += "_dense" if args.dense_rewards else ""
     dataset_loc = args.dataset_loc or f"replay_four_rooms_{args.num_rooms}{dataset_suffix}.pt"
@@ -232,6 +233,8 @@ def build_variant(args):
             detach_conv=False,
             use_adamw=True,
             phi_config="psi",
+            lambda_haus=args.haus_weight,
+            L_haus=args.haus_lipschitz,
         ),
         rl_algorithm="IQL",
         training_iterations=args.training_iterations,
@@ -252,8 +255,8 @@ def build_variant(args):
         save_wandb_video=False,
         device=args.device,
         project_name="gcb-four-rooms",
-        group=f"GCRB_four_rooms_{args.num_rooms}_{goal_mode}_iters{args.training_iterations}_compw{args.compositionality_weight}{dataset_suffix}",
-        name=f"gcb-rooms-{args.num_rooms}_{goal_mode}_iters{args.training_iterations}_compw{args.compositionality_weight}{dataset_suffix}",
+        group=f"GCRB_four_rooms_{args.num_rooms}_{goal_mode}_{reward_mode}_iters{args.training_iterations}_compw{args.compositionality_weight}_hausw{args.haus_weight}",
+        name=f"gcb-rooms-{args.num_rooms}_{goal_mode}_{reward_mode}_iters{args.training_iterations}_compw{args.compositionality_weight}_hausw{args.haus_weight}",
     )
 
 
@@ -285,6 +288,13 @@ if __name__ == "__main__":
                          help="Weight on the phi-only Boolean-algebra compositionality loss "
                               "(union/intersection/negation/bounds over the set encoder Phi). "
                               "0 disables it (default)")
+    parser.add_argument("--haus-weight", type=float, default=0.0,
+                         help="Weight (lambda_haus) on the Hausdorff-Lipschitz regularizer "
+                              "tying the composed goal-set Q-function to the geometry of the "
+                              "compositional phi representation. 0 disables it (default)")
+    parser.add_argument("--haus-lipschitz", type=float, default=1.0,
+                         help="Lipschitz constant L in the Hausdorff regularizer: "
+                              "|Q(s,H,a) - Q(s,K,a)| is penalized past L * D_phi(s;H,K)")
     parser.add_argument("--seed", type=int, default=None,
                          help="Seed for reproducibility; random if unset")
     args = parser.parse_args()
