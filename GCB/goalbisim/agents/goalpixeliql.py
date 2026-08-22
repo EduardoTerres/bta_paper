@@ -50,6 +50,9 @@ class GoalPixelIQLAgent(nn.Module):
         lambda_haus = 0.0,
         L_haus = 1.0,
         lambda_haus_warmup_steps = 10000,
+        lambda_lip = 0.0,
+        L_lip = 1.0,
+        lambda_lip_warmup_steps = 10000,
     ):
         super().__init__()
         self.device = device
@@ -72,6 +75,16 @@ class GoalPixelIQLAgent(nn.Module):
         self.lambda_haus = lambda_haus
         self.L_haus = L_haus
         self.lambda_haus_warmup_steps = lambda_haus_warmup_steps
+
+        # Singleton-level Lipschitz regularizer: ties Q(s,g,a) - Q(s,h,a) to L_lip times the
+        # (detached) raw phi(s,g)-phi(s,h) distance between two individual goals, rather than
+        # the pool-relative Hausdorff distance between goal *sets* used by L_haus above. Tests
+        # whether smoothing the singleton critic directly is enough for it to compose well
+        # under max_{g in H} Q(s,g,a) at inference, without ever training on goal sets. Off by
+        # default (lambda_lip=0).
+        self.lambda_lip = lambda_lip
+        self.L_lip = L_lip
+        self.lambda_lip_warmup_steps = lambda_lip_warmup_steps
 
         self.q_update_period = q_update_period
         self.target_update_period = target_update_period
@@ -298,6 +311,54 @@ class GoalPixelIQLAgent(nn.Module):
 
         return haus_loss, lambda_current
 
+    def lipschitz_loss(self, obs, action, replay_buffer, step, detach_encoder=False, detach_all=False, log=True):
+        """L_Lip: regularizes the singleton critic Q(s,g,a) (trained only via the Bellman/AWR
+        losses above) to vary between two individual goals g, h no faster than L_lip times the
+        raw (ungrounded) phi(s,g)-phi(s,h) distance -- the same compositional phi
+        representation the Hausdorff regularizer above uses, but on singleton goals rather
+        than pool-relative goal sets. g, h are drawn from the same replay-buffer pool used by
+        `hausdorff_loss`. The phi distance is a fixed (detached) target; only the Q branch
+        carries gradient."""
+        phi_module = self.critic_representation.phi
+        pool_imgs = phi_module.sample_compositionality_pool(replay_buffer)
+        n, batch = pool_imgs.shape[0], obs.shape[0]
+
+        idx_g = torch.randint(0, n, (batch,), device=obs.device)
+        idx_h = torch.randint(0, max(n - 1, 1), (batch,), device=obs.device)
+        idx_h = idx_h + (idx_h >= idx_g).long()  # skip idx_g so h != g, uniform over the rest
+
+        goal_g = pool_imgs[idx_g]
+        goal_h = pool_imgs[idx_h]
+
+        with torch.no_grad():
+            z_g = phi_module.encode(obs, goal_g)
+            z_h = phi_module.encode(obs, goal_h)
+            d_phi = (z_g - z_h).norm(dim=-1)
+
+        Q1_g, Q2_g = self.critic(obs, goal_g, action, detach_encoder=detach_encoder, detach_all=detach_all)
+        Q1_h, Q2_h = self.critic(obs, goal_h, action, detach_encoder=detach_encoder, detach_all=detach_all)
+        Q_g = torch.min(Q1_g, Q2_g)
+        Q_h = torch.min(Q1_h, Q2_h)
+
+        margin = (Q_g - Q_h).abs().squeeze(-1) - self.L_lip * d_phi
+        lip_loss = F.relu(margin).pow(2).mean()
+        lambda_current = self.lambda_lip * min(1.0, step / max(1, self.lambda_lip_warmup_steps))
+
+        if log:
+            with torch.no_grad():
+                stats = {
+                    'train_step': step,
+                    'train/lip/loss': lip_loss.item(),
+                    'train/lip/lambda_current': lambda_current,
+                    'train/lip/d_phi_mean': d_phi.mean().item(),
+                    'train/lip/Q_g_mean': Q_g.mean().item(),
+                    'train/lip/Q_h_mean': Q_h.mean().item(),
+                    'train/lip/margin_violation_frac': (margin > 0).float().mean().item(),
+                }
+            logger.logging_tool.log(stats)
+
+        return lip_loss, lambda_current
+
     def IQL_update(self, obs, goals, action, reward, next_obs, not_done, step, critic_gradients_allowed = True, init_obs=None, replay_buffer=None):
 
         #IQL Q Update
@@ -337,6 +398,13 @@ class GoalPixelIQLAgent(nn.Module):
                 detach_encoder=self.detach_conv, detach_all=self.detach_encoder,
             )
             critic_loss = critic_loss + lambda_haus_current * haus_loss
+
+        if self.lambda_lip > 0 and replay_buffer is not None:
+            lip_loss, lambda_lip_current = self.lipschitz_loss(
+                obs, action, replay_buffer, step,
+                detach_encoder=self.detach_conv, detach_all=self.detach_encoder,
+            )
+            critic_loss = critic_loss + lambda_lip_current * lip_loss
 
         policy_logpp = dist.log_prob(action)
 

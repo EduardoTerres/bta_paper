@@ -235,6 +235,8 @@ def build_variant(args):
             phi_config="psi",
             lambda_haus=args.haus_weight,
             L_haus=args.haus_lipschitz,
+            lambda_lip=args.lip_weight,
+            L_lip=args.lip_lipschitz,
         ),
         rl_algorithm="IQL",
         training_iterations=args.training_iterations,
@@ -255,8 +257,8 @@ def build_variant(args):
         save_wandb_video=False,
         device=args.device,
         project_name="gcb-four-rooms",
-        group=f"GCRB_four_rooms_{args.num_rooms}_{goal_mode}_{reward_mode}_iters{args.training_iterations}_compw{args.compositionality_weight}_hausw{args.haus_weight}",
-        name=f"gcb-rooms-{args.num_rooms}_{goal_mode}_{reward_mode}_iters{args.training_iterations}_compw{args.compositionality_weight}_hausw{args.haus_weight}",
+        group=f"GCRB_four_rooms_{args.num_rooms}_{goal_mode}_{reward_mode}_iters{args.training_iterations}_compw{args.compositionality_weight}_hausw{args.haus_weight}_lipw{args.lip_weight}",
+        name=f"gcb-rooms-{args.num_rooms}_{goal_mode}_{reward_mode}_iters{args.training_iterations}_compw{args.compositionality_weight}_hausw{args.haus_weight}_lipw{args.lip_weight}",
     )
 
 
@@ -295,6 +297,15 @@ if __name__ == "__main__":
     parser.add_argument("--haus-lipschitz", type=float, default=1.0,
                          help="Lipschitz constant L in the Hausdorff regularizer: "
                               "|Q(s,H,a) - Q(s,K,a)| is penalized past L * D_phi(s;H,K)")
+    parser.add_argument("--lip-weight", type=float, default=0.0,
+                         help="Weight (lambda_lip) on the singleton-level Lipschitz "
+                              "regularizer tying Q(s,g,a) - Q(s,h,a), for individual goals "
+                              "g, h, to the geometry of the (separately trained) phi "
+                              "representation, without ever training on goal sets. 0 "
+                              "disables it (default)")
+    parser.add_argument("--lip-lipschitz", type=float, default=1.0,
+                         help="Lipschitz constant L in the singleton regularizer: "
+                              "|Q(s,g,a) - Q(s,h,a)| is penalized past L * ||phi(s,g) - phi(s,h)||")
     parser.add_argument("--seed", type=int, default=None,
                          help="Seed for reproducibility; random if unset")
     args = parser.parse_args()

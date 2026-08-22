@@ -20,12 +20,12 @@ python offline_gcab_four_rooms_vision.py \
     --training-iterations 50000 \
     --eval-freq 200 \
     --log-freq 200 \
-    --seed 42 \
+    --seed 0 \
     --use-wandb \
     --haus-weight 1 \
     --haus-lipschitz 1 \
-
-
+    --lip-weight 1 \
+    --lip-lipschitz 1 \
 
 
     # --dense-rewards \
