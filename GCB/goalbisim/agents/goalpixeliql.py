@@ -359,17 +359,17 @@ class GoalPixelIQLAgent(nn.Module):
 
         return lip_loss, lambda_current
 
-    def IQL_update(self, obs, goals, action, reward, next_obs, not_done, step, critic_gradients_allowed = True, init_obs=None, replay_buffer=None):
+    def IQL_update(self, obs, goals, action, reward, next_obs, not_done, step, critic_gradients_allowed=True, init_obs=None, replay_buffer=None, goal_set=None):
 
         #IQL Q Update
 
-        mu, std, dist = self.actor(obs, goals, detach_encoder=True, detach_all = True, init_obs=init_obs) #Detach for actor, just use critic for advice
+        mu, std, dist = self.actor(obs, goals, detach_encoder=True, detach_all=True, init_obs=init_obs, goal_set=goal_set) #Detach for actor, just use critic for advice
         if critic_gradients_allowed:
-            Q1_pred, Q2_pred = self.critic(obs, goals, action, detach_encoder = self.detach_conv, detach_all = self.detach_encoder)
+            Q1_pred, Q2_pred = self.critic(obs, goals, action, detach_encoder=self.detach_conv, detach_all=self.detach_encoder, goal_set=goal_set)
         else:
-            Q1_pred, Q2_pred = self.critic(obs, goals, action, detach_encoder=True, detach_all = True)
+            Q1_pred, Q2_pred = self.critic(obs, goals, action, detach_encoder=True, detach_all=True, goal_set=goal_set)
 
-        V_target = self.critic.forward_v(next_obs, goals).detach()
+        V_target = self.critic.forward_v(next_obs, goals, goal_set=goal_set).detach()
 
         target_Q = (reward + not_done * self.discount * V_target).detach()
 
@@ -381,10 +381,10 @@ class GoalPixelIQLAgent(nn.Module):
 
         #IQL V Update
 
-        Q1_pred_target, Q2_pred_target = self.critic_target(obs, goals, action, detach_encoder=True, detach_all = True)
+        Q1_pred_target, Q2_pred_target = self.critic_target(obs, goals, action, detach_encoder=True, detach_all=True, goal_set=goal_set)
 
         min_q_update = torch.min(Q1_pred_target, Q2_pred_target).detach()
-        V_pred = self.critic.forward_v(obs, goals)
+        V_pred = self.critic.forward_v(obs, goals, goal_set=goal_set)
         Vf_error = V_pred - min_q_update
         Vf_sign = (Vf_error > 0).float()
         vf_weight = (1 - Vf_sign) * self.quantile + Vf_sign * (1 - self.quantile)
@@ -458,9 +458,9 @@ class GoalPixelIQLAgent(nn.Module):
         if self.analogy_goal:
             kwargs['analogy_obs'] = kwargs['analogy_obses']
             kwargs['analogy_goals'] = kwargs['analogy_goals']
-            self.IQL_update(obs, [kwargs['analogy_obses'], kwargs['analogy_goals']], action, reward, next_obs, not_done, step, init_obs=kwargs.get('init_obs', None), replay_buffer=replay_buffer)
+            self.IQL_update(obs, [kwargs['analogy_obses'], kwargs['analogy_goals']], action, reward, next_obs, not_done, step, init_obs=kwargs.get('init_obs', None), replay_buffer=replay_buffer, goal_set=kwargs.get("goal_set"))
         else:
-            self.IQL_update(obs, goals, action, reward, next_obs, not_done, step, init_obs=kwargs.get('init_obs', None), replay_buffer=replay_buffer)
+            self.IQL_update(obs, goals, action, reward, next_obs, not_done, step, init_obs=kwargs.get('init_obs', None), replay_buffer=replay_buffer, goal_set=kwargs.get("goal_set"))
         self.critic_representation.update(replay_buffer, self, kwargs, step) #Important to pass in policy!
 
         if step % self.target_update_period == 0:
@@ -528,7 +528,7 @@ class GoalPixelIQLAgent(nn.Module):
         kwargs['td'] = None
         kwargs['goal'] = goals
 
-        self.IQL_update(obs, goals, action, reward, next_obs, not_done, step, critic_gradients_allowed = critic_gradients_allowed, init_obs=kwargs.get('init_obs', None), replay_buffer=replay_buffer)
+        self.IQL_update(obs, goals, action, reward, next_obs, not_done, step, critic_gradients_allowed = critic_gradients_allowed, init_obs=kwargs.get('init_obs', None), replay_buffer=replay_buffer, goal_set=kwargs.get("goal_set"))
 
         if step % self.target_update_period == 0:
             soft_update_params(

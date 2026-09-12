@@ -99,17 +99,10 @@ class FourRoomsGoalEnv(gym.Env):
         for x, y in (extra_positions if extra_positions is not None else [position]):
             grid[x, y] = np.array([0, 180, 0], dtype=np.uint8)
 
-        return self._rasterize_grid(grid)
-
-    def _rasterize_grid(self, grid):
-        """Resize a grid to the square observation without clipping its edges."""
-        row_indices = np.floor(
-            np.arange(self.obs_img_dim) * grid.shape[0] / self.obs_img_dim
-        ).astype(int)
-        col_indices = np.floor(
-            np.arange(self.obs_img_dim) * grid.shape[1] / self.obs_img_dim
-        ).astype(int)
-        image = grid[row_indices[:, None], col_indices[None, :]]
+        scale_x = int(np.ceil(self.obs_img_dim / self.env.n))
+        scale_y = int(np.ceil(self.obs_img_dim / self.env.m))
+        image = np.kron(grid, np.ones((scale_x, scale_y, 1), dtype=np.uint8))
+        image = image[: self.obs_img_dim, : self.obs_img_dim]
         return image.transpose(2, 0, 1).copy()
 
     def _obs(self):
@@ -135,7 +128,11 @@ class FourRoomsGoalEnv(gym.Env):
         for x, y in positions:
             grid[x, y] = np.array([0, 180, 0], dtype=np.uint8)
 
-        return self._rasterize_grid(grid)
+        scale_x = int(np.ceil(self.obs_img_dim / self.env.n))
+        scale_y = int(np.ceil(self.obs_img_dim / self.env.m))
+        image = np.kron(grid, np.ones((scale_x, scale_y, 1), dtype=np.uint8))
+        image = image[: self.obs_img_dim, : self.obs_img_dim]
+        return image.transpose(2, 0, 1).copy()
 
     def _next_goal_index(self):
         if not self._goal_cycle:

@@ -1,0 +1,447 @@
+#!/usr/bin/env python3
+"""Offline image IQL conditioned on the learned goal-slice representation.
+
+The trainer reuses GoalSliceReplayBuffer datasets from goal_slice_gcb_four_rooms:
+the stored query-hit flag supplies the terminal mask, so no replay recollection is
+needed for a compatible .pt file.  Phi is trained with the same representation,
+validation, collapse, and UMAP diagnostics as the goal-slice experiment; IQL adds
+a psi state encoder and discrete actor/twin-Q/value heads conditioned on (psi, phi).
+"""
+
+import argparse
+import copy
+import json
+import logging
+import os
+import random
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from environments.four_rooms import FourRoomsGoalEnv
+from goalbisim.representation.encoders.RADencoder import PixelEncoder
+from goal_slice_gcb_four_rooms import (
+    GoalSliceGCB,
+    GoalSliceReplayBuffer,
+    collect,
+    evaluate_collapse,
+    goal_set_split,
+    log_training_umap,
+    model_checkpoint_steps,
+    seed_everywhere,
+    start_wandb,
+    transition,
+    umap_snapshot_steps,
+)
+
+log = logging.getLogger("goal_slice_gcb_iql")
+
+
+class MLP(nn.Module):
+    def __init__(self, input_dim, output_dim, hidden_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class GoalSliceImageIQL(nn.Module):
+    """Discrete IQL with a psi image encoder and a separately trained task phi."""
+
+    def __init__(self, image_shape, phi_model, args, device):
+        super().__init__()
+        self.device = device
+        self.phi_model = phi_model
+        self.discount = args.discount
+        self.expectile = args.iql_expectile
+        self.beta = args.iql_beta
+        self.advantage_clip = args.iql_advantage_clip
+        self.target_tau = args.iql_target_tau
+
+        self.psi = PixelEncoder(image_shape, args.feature_dim, args.num_layers,
+                                args.num_filters, output_logits=True).to(device)
+        feature_dim = 2 * args.feature_dim
+        action_dim = int(np.prod(args.action_shape))
+        self.actor = MLP(feature_dim, action_dim, args.iql_hidden_dim).to(device)
+        self.q1 = MLP(feature_dim + action_dim, 1, args.iql_hidden_dim).to(device)
+        self.q2 = MLP(feature_dim + action_dim, 1, args.iql_hidden_dim).to(device)
+        self.value = MLP(feature_dim, 1, args.iql_hidden_dim).to(device)
+
+        self.target_psi = copy.deepcopy(self.psi).to(device)
+        self.target_q1 = copy.deepcopy(self.q1).to(device)
+        self.target_q2 = copy.deepcopy(self.q2).to(device)
+        for module in (self.target_psi, self.target_q1, self.target_q2):
+            module.requires_grad_(False)
+
+        critic_parameters = list(self.psi.parameters()) + list(self.q1.parameters())
+        critic_parameters += list(self.q2.parameters()) + list(self.value.parameters())
+        self.critic_optimizer = torch.optim.AdamW(
+            critic_parameters, lr=args.critic_lr, weight_decay=args.weight_decay,
+        )
+        self.actor_optimizer = torch.optim.AdamW(
+            self.actor.parameters(), lr=args.actor_lr, weight_decay=args.weight_decay,
+        )
+
+    def features(self, state, query, goal_set, target=False, detach_phi=True):
+        psi = (self.target_psi if target else self.psi)(state)
+        task = self.phi_model.encode(state, query, goal_set)
+        if detach_phi:
+            task = task.detach()
+        return torch.cat((psi, task), dim=1)
+
+    def q_values(self, features, action, target=False):
+        values = torch.cat((features, action), dim=1)
+        if target:
+            return self.target_q1(values), self.target_q2(values)
+        return self.q1(values), self.q2(values)
+
+    @staticmethod
+    def _soft_update(source, target, tau):
+        for source_parameter, target_parameter in zip(source.parameters(), target.parameters()):
+            target_parameter.data.lerp_(source_parameter.data, tau)
+
+    def update(self, batch):
+        state, query, goal_set = batch["state"], batch["query"], batch["goal_set"]
+        next_state, action, reward = batch["next_state"], batch["action"], batch["reward"]
+        not_done = batch["not_done"]
+
+        features = self.features(state, query, goal_set)
+        q1, q2 = self.q_values(features, action)
+        with torch.no_grad():
+            next_features = self.features(next_state, query, goal_set)
+            target_q1, target_q2 = self.q_values(
+                self.features(state, query, goal_set, target=True), action, target=True,
+            )
+            value_next = self.value(next_features)
+            td_target = reward + not_done * self.discount * value_next
+            q_min_target = torch.minimum(target_q1, target_q2)
+
+        q_loss = F.mse_loss(q1, td_target) + F.mse_loss(q2, td_target)
+        value = self.value(features)
+        value_error = value - q_min_target
+        value_weight = torch.where(
+            value_error > 0,
+            torch.full_like(value_error, 1.0 - self.expectile),
+            torch.full_like(value_error, self.expectile),
+        )
+        value_loss = (value_weight * value_error.square()).mean()
+        critic_loss = q_loss + value_loss
+
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        critic_loss.backward()
+        self.critic_optimizer.step()
+
+        with torch.no_grad():
+            actor_features = self.features(state, query, goal_set)
+            actor_q1, actor_q2 = self.q_values(actor_features, action)
+            advantage = torch.minimum(actor_q1, actor_q2) - self.value(actor_features)
+            weights = torch.exp(advantage / self.beta).clamp(max=self.advantage_clip)
+
+        logits = self.actor(actor_features.detach())
+        action_index = action.argmax(dim=1)
+        actor_loss = (F.cross_entropy(logits, action_index, reduction="none") * weights.squeeze(1)).mean()
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        actor_loss.backward()
+        self.actor_optimizer.step()
+
+        self._soft_update(self.psi, self.target_psi, self.target_tau)
+        self._soft_update(self.q1, self.target_q1, self.target_tau)
+        self._soft_update(self.q2, self.target_q2, self.target_tau)
+
+        return {
+            "train/iql/critic_loss": float(critic_loss.item()),
+            "train/iql/q_loss": float(q_loss.item()),
+            "train/iql/value_loss": float(value_loss.item()),
+            "train/iql/actor_loss": float(actor_loss.item()),
+            "train/iql/q1_mean": float(q1.detach().mean().item()),
+            "train/iql/q2_mean": float(q2.detach().mean().item()),
+            "train/iql/value_mean": float(value.detach().mean().item()),
+            "train/iql/td_target_mean": float(td_target.mean().item()),
+            "train/iql/advantage_mean": float(advantage.mean().item()),
+            "train/iql/advantage_weight_mean": float(weights.mean().item()),
+            "train/iql/actor_entropy": float(torch.distributions.Categorical(logits=logits).entropy().mean().item()),
+            "train/iql/action_accuracy": float((logits.argmax(dim=1) == action_index).float().mean().item()),
+            "train/iql/reward_mean": float(reward.mean().item()),
+            "train/iql/not_done_mean": float(not_done.mean().item()),
+        }
+
+    @torch.no_grad()
+    def act(self, state, query, goal_set):
+        self.eval()
+        state = torch.as_tensor(state, device=self.device).float().div(255).unsqueeze(0)
+        query = torch.as_tensor(query, device=self.device).float().div(255).unsqueeze(0)
+        goal_set = torch.as_tensor(goal_set, device=self.device).float().div(255).unsqueeze(0)
+        return int(self.actor(self.features(state, query, goal_set)).argmax(dim=1).item())
+
+
+def sample_rl_batch(replay, size, device, query_hit_oversample, pool_indices):
+    batch = replay.sample(size, device, query_hit_oversample, pool_indices)
+    indices_are_terminal = torch.as_tensor(
+        replay.query_hits[np.random.choice(pool_indices, size=size, replace=True)],
+        device=device,
+    )
+    # Replay.sample may oversample query-hit transitions independently. Reconstruct
+    # the terminal mask from the rendered next-state/query equality, which remains
+    # valid for legacy replays without query_hits.
+    equal_axes = tuple(range(1, batch["next_state"].ndim))
+    terminal = (batch["next_state"] == batch["query"]).all(dim=equal_axes).view(-1, 1)
+    batch["not_done"] = (~terminal).float()
+    del indices_are_terminal
+    return batch
+
+
+def held_out_policy_evaluation(agent, args, device):
+    """Roll out deterministic policies on unseen goal sets using image-only inputs."""
+    env = FourRoomsGoalEnv(num_rooms=args.num_rooms, obs_img_dim=args.obs_img_dim,
+                           max_episode_steps=args.max_episode_steps, slip_prob=0.0)
+    rng = np.random.RandomState(args.seed + 8011)
+    positions = list(env.env.possiblePositions)
+    goals = [tuple(goal) for goal in env.goal_positions]
+    if args.evaluate_on_held_out:
+        _, goal_sets = goal_set_split(goals)
+    else:
+        goal_sets = [tuple([goal]) for goal in goals]
+    walls, valid = set(env.env.walls), set(positions)
+
+    returns, lengths, included_returns, excluded_returns = [], [], [], []
+    included_successes, excluded_avoids = [], []
+    for member in (False, True):
+        for _ in range(args.rl_eval_episodes_per_status):
+            query = goals[rng.randint(len(goals))]
+            candidates = [goal_set for goal_set in goal_sets if (query in goal_set) == member]
+            if not candidates:
+                continue
+            goal_set = candidates[rng.randint(len(candidates))]
+            position = positions[rng.randint(len(positions))]
+            query_image = env.render_goal_set([query])
+            set_image = env.render_goal_set(goal_set)
+            episode_return, hit_query = 0.0, False
+            for step in range(args.max_episode_steps):
+                state_image = env.render_goal_set([position])
+                action = agent.act(state_image, query_image, set_image)
+                position = transition(position, action, walls, valid)
+                reward = args.r_universal if position == query and member else (
+                    args.r_empty if position == query else (
+                        args.r_min if position in goal_set else 0.0
+                    )
+                )
+                episode_return += (args.discount ** step) * reward
+                if position == query:
+                    hit_query = True
+                    break
+            returns.append(episode_return)
+            lengths.append(step + 1)
+            if member:
+                included_returns.append(episode_return)
+                included_successes.append(float(hit_query))
+            else:
+                excluded_returns.append(episode_return)
+                excluded_avoids.append(float(not hit_query))
+
+    return {
+        "eval/rl/return_mean": float(np.mean(returns)),
+        "eval/rl/return_std": float(np.std(returns)),
+        "eval/rl/episode_length_mean": float(np.mean(lengths)),
+        "eval/rl/query_included_success_rate": float(np.mean(included_successes)),
+        "eval/rl/query_included_return_mean": float(np.mean(included_returns)),
+        "eval/rl/query_excluded_avoid_rate": float(np.mean(excluded_avoids)),
+        "eval/rl/query_excluded_return_mean": float(np.mean(excluded_returns)),
+        "eval/rl/episodes": len(returns),
+    }
+
+
+def write_metrics(metrics_file, wandb_run, metrics):
+    metrics_file.write(json.dumps(metrics) + "\n")
+    metrics_file.flush()
+    if wandb_run:
+        wandb_run.log(metrics, step=metrics["step"])
+
+
+def train(args, dataset_path):
+    device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but unavailable")
+    replay = GoalSliceReplayBuffer.load(dataset_path, args.number_training_points)
+    args.action_shape = replay.action_shape
+    phi_model = GoalSliceGCB(replay.image_shape, args, device)
+    agent = GoalSliceImageIQL(replay.image_shape, phi_model, args, device)
+    env = FourRoomsGoalEnv(num_rooms=args.num_rooms, obs_img_dim=args.obs_img_dim, slip_prob=0.0)
+
+    split_rng = np.random.RandomState(args.seed + 2718)
+    indices = split_rng.permutation(replay.idx)
+    validation_size = max(1, int(round(replay.idx * args.validation_fraction)))
+    if validation_size >= replay.idx:
+        raise ValueError("validation_fraction leaves no training transitions")
+    validation_indices, train_indices = indices[:validation_size], indices[validation_size:]
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        phi_model.optimizer, mode="min", factor=args.lr_factor, patience=args.lr_patience, min_lr=args.min_lr,
+    )
+    name = (
+        "goal-slice-gcb-iql-rooms%d-fdim%d-rmin%s-iters%d-bs%d-qhit%.3g-seed%d"
+        % (args.num_rooms, args.feature_dim, args.r_min, args.training_iterations,
+           args.batch_size, args.query_hit_oversample, args.seed)
+    )
+    output_dir = Path(args.output_dir) / name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    wandb_run = start_wandb(args, name)
+    umap_steps = umap_snapshot_steps(args.training_iterations, args.num_umap_images) if wandb_run and args.log_umap else set()
+    checkpoint_steps = model_checkpoint_steps(args.training_iterations, args.num_checkpoints)
+    started = time.time()
+
+    with (output_dir / "metrics.jsonl").open("w") as metrics_file:
+        for step in range(args.training_iterations):
+            phi_metrics = phi_model.update(
+                replay.sample(args.batch_size, device, args.query_hit_oversample, train_indices),
+            )
+            iql_metrics = agent.update(
+                sample_rl_batch(replay, args.batch_size, device, args.query_hit_oversample, train_indices),
+            )
+            if step % args.log_freq == 0:
+                metrics = dict(phi_metrics)
+                metrics.update(iql_metrics)
+                metrics.update(
+                    step=step,
+                    **{"train/steps_per_second": (step + 1) / max(time.time() - started, 1e-8)},
+                )
+                write_metrics(metrics_file, wandb_run, metrics)
+                log.info("step=%d phi=%.5f q=%.5f v=%.5f actor=%.5f",
+                         step, metrics["train/phi_loss"], metrics["train/iql/q_loss"],
+                         metrics["train/iql/value_loss"], metrics["train/iql/actor_loss"])
+
+            if step % args.validation_freq == 0 or step + 1 == args.training_iterations:
+                validation = phi_model.validation_metrics(
+                    replay.sample(args.batch_size, device, pool_indices=validation_indices),
+                )
+                scheduler.step(validation["stats_eval/phi_loss"])
+                validation.update(step=step, **{"stats_eval/lr": phi_model.optimizer.param_groups[0]["lr"]})
+                write_metrics(metrics_file, wandb_run, validation)
+
+            if step % args.eval_freq == 0 or step + 1 == args.training_iterations:
+                metrics = evaluate_collapse(phi_model, env, args, device)
+                metrics.update({"stats_eval/" + key: value for key, value in metrics.items() if key.startswith("collapse/")})
+                metrics.update(held_out_policy_evaluation(agent, args, device))
+                metrics["step"] = step
+                write_metrics(metrics_file, wandb_run, metrics)
+                log.info("step=%d separation=%.3f eval_return=%.3f included_success=%.3f",
+                         step, metrics["collapse/separation_ratio"], metrics["eval/rl/return_mean"],
+                         metrics["eval/rl/query_included_success_rate"])
+
+            if wandb_run and args.log_umap and step in umap_steps:
+                log_training_umap(phi_model, env, args, device, wandb_run, output_dir, step, split="train")
+                if args.evaluate_on_held_out:
+                    log_training_umap(phi_model, env, args, device, wandb_run, output_dir, step, split="eval")
+
+            if step in checkpoint_steps:
+                checkpoint = {
+                    "phi_model": phi_model.state_dict(),
+                    "agent": agent.state_dict(),
+                    "args": vars(args),
+                    "step": step + 1,
+                }
+                checkpoint_path = output_dir / (
+                    "goal_slice_gcb_iql.pt" if step + 1 == args.training_iterations
+                    else "goal_slice_gcb_iql_step_%07d.pt" % (step + 1)
+                )
+                torch.save(checkpoint, checkpoint_path)
+
+    if args.training_iterations - 1 not in checkpoint_steps:
+        torch.save({"phi_model": phi_model.state_dict(), "agent": agent.state_dict(),
+                    "args": vars(args), "step": args.training_iterations},
+                   output_dir / "goal_slice_gcb_iql.pt")
+    if wandb_run:
+        wandb_run.finish()
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--num-rooms", type=int, default=8, choices=(4, 8, 16))
+    parser.add_argument("--obs-img-dim", type=int, default=64)
+    parser.add_argument("--max-episode-steps", type=int, default=75)
+    parser.add_argument("--dataset-loc", default="")
+    parser.add_argument("--dataset-steps", type=int, default=200000)
+    parser.add_argument("--number-training-points", type=int, default=180000)
+    parser.add_argument("--no-collect", action="store_true")
+    parser.add_argument("--training-iterations", type=int, default=50000)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--query-hit-oversample", type=float, default=0.0)
+    parser.add_argument("--validation-fraction", type=float, default=.1)
+    parser.add_argument("--validation-freq", type=int, default=500)
+    parser.add_argument("--lr-patience", type=int, default=5)
+    parser.add_argument("--lr-factor", type=float, default=.5)
+    parser.add_argument("--min-lr", type=float, default=1e-7)
+    parser.add_argument("--eval-freq", type=int, default=500)
+    parser.add_argument("--log-freq", type=int, default=100)
+    parser.add_argument("--num-checkpoints", type=int, default=10)
+    parser.add_argument("--feature-dim", type=int, default=256)
+    parser.add_argument("--num-layers", type=int, default=6)
+    parser.add_argument("--num-filters", type=int, default=32)
+    parser.add_argument("--normalize-embeddings", action="store_true")
+    parser.add_argument("--metric-loss", choices=("l1", "l2"), default="l1")
+    parser.add_argument("--discount", type=float, default=.99)
+    parser.add_argument("--action-weight", type=float, default=25.)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=5e-4)
+    parser.add_argument("--r-universal", type=float, default=1.)
+    parser.add_argument("--r-empty", type=float, default=-1.)
+    parser.add_argument("--r-min", type=float, default=-.25)
+    parser.add_argument("--evaluate-on-held-out", action="store_true")
+    parser.add_argument("--collapse-eval-states", type=int, default=32)
+    parser.add_argument("--collapse-sets-per-status", type=int, default=16)
+    parser.add_argument("--log-umap", action="store_true")
+    parser.add_argument("--num-umap-images", type=int, default=50)
+    parser.add_argument("--global-umap-states", type=int, default=32)
+    parser.add_argument("--individual-umap-contexts", type=int, default=4)
+    parser.add_argument("--umap-sets-per-class", type=int, default=64)
+    parser.add_argument("--umap-n-neighbors", type=int, default=15)
+    parser.add_argument("--umap-min-dist", type=float, default=.1)
+    parser.add_argument("--umap-usetex", action="store_true")
+    parser.add_argument("--iql-hidden-dim", type=int, default=256)
+    parser.add_argument("--actor-lr", type=float, default=1e-4)
+    parser.add_argument("--critic-lr", type=float, default=1e-4)
+    parser.add_argument("--iql-expectile", type=float, default=.7)
+    parser.add_argument("--iql-beta", type=float, default=3.0)
+    parser.add_argument("--iql-advantage-clip", type=float, default=100.)
+    parser.add_argument("--iql-target-tau", type=float, default=.005)
+    parser.add_argument("--rl-eval-episodes-per-status", type=int, default=32)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--output-dir", default="goal_slice_gcb_iql_runs")
+    parser.add_argument("--use-wandb", action="store_true")
+    parser.add_argument("--project-name", default="gcb-four-rooms")
+    parser.add_argument("--group", default="")
+    return parser.parse_args()
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+    args = parse_args()
+    if not 0. < args.validation_fraction < 1.:
+        raise ValueError("--validation-fraction must be in (0, 1)")
+    if args.r_universal == args.r_empty:
+        raise ValueError("r_universal and r_empty must differ for goal-set control")
+    seed_everywhere(args.seed)
+    suffix = "_heldout80_20" if args.evaluate_on_held_out else ""
+    dataset = args.dataset_loc or "replay_goal_slice_four_rooms_%d%s.pt" % (args.num_rooms, suffix)
+    if not os.path.exists(dataset):
+        if args.no_collect:
+            raise FileNotFoundError("Dataset missing: %s" % dataset)
+        collect(args, dataset)
+    elif args.evaluate_on_held_out:
+        manifest = Path(dataset).with_suffix(".goal_set_split.json")
+        if not manifest.exists():
+            raise FileNotFoundError("Held-out evaluation requires %s" % manifest)
+    log.info("Using compatible goal-slice replay: %s", dataset)
+    train(args, dataset)
+
+
+if __name__ == "__main__":
+    main()

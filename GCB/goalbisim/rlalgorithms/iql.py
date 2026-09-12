@@ -13,6 +13,10 @@ from torch.distributions.multivariate_normal import MultivariateNormal
 import goalbisim.utils.misc_utils
 from goalbisim.rlalgorithms.sac import Actor, Critic, QFunction, VFunction, gaussian_logprob, squash, weight_init
 
+def _phi_input(obs, goal, goal_set):
+    """Build the paired-representation input, optionally with goal-set context."""
+    tensors = (obs, goal) if goal_set is None else (obs, goal, goal_set)
+    return torch.cat(tensors, dim=1)
 
 
 class GoalActorIQL(Actor): #Same exact actor as SAC
@@ -52,7 +56,7 @@ class GoalActorIQL(Actor): #Same exact actor as SAC
         self.phi_config = phi_config
         self.phi_encoder = phi_encoder
 
-    def forward(self, obs, goal, compute_pi=True, compute_log_pi=True, detach_encoder=False, detach_all=False, init_obs=None):
+    def forward(self, obs, goal, compute_pi=True, compute_log_pi=True, detach_encoder=False, detach_all=False, init_obs=None, goal_set=None):
         
         #import pdb; pdb.set_trace()
         if self.phi_config == 'psi':
@@ -67,15 +71,15 @@ class GoalActorIQL(Actor): #Same exact actor as SAC
         elif self.phi_config == 'psi_phi':
             psi = self.encoder(obs, detach=detach_encoder, detach_all=detach_all)
             if self.analogy_goal:
-                phi_input = torch.cat([obs, goal], dim = 1)
+                phi_input = _phi_input(obs, goal, goal_set)
                 phi = self.phi_encoder(phi_input, detach=detach_encoder, detach_all=detach_all)
                 policy_input = torch.cat([psi, phi], dim = 1)
             else:
-                phi_input = torch.cat([obs, goal], dim = 1)
+                phi_input = _phi_input(obs, goal, goal_set)
                 phi = self.phi_encoder(phi_input, detach=detach_encoder, detach_all=detach_all)
                 policy_input = torch.cat([psi, phi], dim = 1)
         elif self.phi_config == 'phi':
-            phi_input = torch.cat([obs, goal], dim = 1)
+            phi_input = _phi_input(obs, goal, goal_set)
             policy_input = self.phi_encoder(phi_input, detach=detach_encoder, detach_all=detach_all)
         elif self.phi_config == 'cpv':
             if self.analogy_goal:
@@ -158,7 +162,7 @@ class GoalCriticIQL(Critic): #Basically same critic as SAC, but has a value func
 
         self.phi_config = phi_config
 
-    def forward_v(self, obs, goal, detach_encoder=False, detach_all=False):
+    def forward_v(self, obs, goal, detach_encoder=False, detach_all=False, goal_set=None):
         if self.phi_config == 'psi':
             obs = self.encoder(obs, detach=detach_encoder, detach_all=detach_all)
             if self.analogy_goal:
@@ -171,15 +175,15 @@ class GoalCriticIQL(Critic): #Basically same critic as SAC, but has a value func
         elif self.phi_config == 'psi_phi':
             psi = self.encoder(obs, detach=detach_encoder, detach_all=detach_all)
             if self.analogy_goal:
-                phi_input = torch.cat([obs, goal], dim = 1)
+                phi_input = _phi_input(obs, goal, goal_set)
                 phi = self.phi_encoder(phi_input, detach=detach_encoder, detach_all=detach_all)
                 q_input = torch.cat([psi, phi], dim = 1)
             else:
-                phi_input = torch.cat([obs, goal], dim = 1)
+                phi_input = _phi_input(obs, goal, goal_set)
                 phi = self.phi_encoder(phi_input, detach=detach_encoder, detach_all=detach_all)
                 q_input = torch.cat([psi, phi], dim = 1)
         elif self.phi_config == 'phi':
-            phi_input = torch.cat([obs, goal], dim = 1)
+            phi_input = _phi_input(obs, goal, goal_set)
             q_input = self.phi_encoder(phi_input, detach=detach_encoder, detach_all=detach_all)
         else:
             raise NotImplementedError
@@ -190,7 +194,7 @@ class GoalCriticIQL(Critic): #Basically same critic as SAC, but has a value func
 
         return v
 
-    def forward(self, obs, goal, action, detach_encoder=False, detach_all=False):
+    def forward(self, obs, goal, action, detach_encoder=False, detach_all=False, goal_set=None):
         # detach_encoder allows to stop gradient propogation to encoder
         if self.phi_config == 'psi':
             obs = self.encoder(obs, detach=detach_encoder, detach_all=detach_all)
@@ -204,15 +208,15 @@ class GoalCriticIQL(Critic): #Basically same critic as SAC, but has a value func
         elif self.phi_config == 'psi_phi':
             psi = self.encoder(obs, detach=detach_encoder, detach_all=detach_all)
             if self.analogy_goal:
-                phi_input = torch.cat([obs, goal], dim = 1)
+                phi_input = _phi_input(obs, goal, goal_set)
                 phi = self.phi_encoder(phi_input, detach=detach_encoder, detach_all=detach_all)
                 q_input = torch.cat([psi, phi], dim = 1)
             else:
-                phi_input = torch.cat([obs, goal], dim = 1)
+                phi_input = _phi_input(obs, goal, goal_set)
                 phi = self.phi_encoder(phi_input, detach=detach_encoder, detach_all=detach_all)
                 q_input = torch.cat([psi, phi], dim = 1)
         elif self.phi_config == 'phi':
-            phi_input = torch.cat([obs, goal], dim = 1)
+            phi_input = _phi_input(obs, goal, goal_set)
             q_input = self.phi_encoder(phi_input, detach=detach_encoder, detach_all=detach_all)
         else:
             raise NotImplementedError

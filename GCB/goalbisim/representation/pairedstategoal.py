@@ -41,11 +41,17 @@ class PairedStateGoal(nn.Module):
             ground_space = True,
             lambda_comp = 1.0,
             beta_comp = 1.0,
-            lambda_comp_warmup_steps = 10000):
+            lambda_comp_warmup_steps = 10000,
+            goal_set_conditioned = False):
         super().__init__()
 
         self.device = device
-        self.encoder = PixelEncoder(obs_shape, feature_dim, num_layers, num_filters, output_logits = output_logits, goal_flag = True).to(self.device)
+        self.goal_set_conditioned = goal_set_conditioned
+        encoder_shape = obs_shape
+        if self.goal_set_conditioned:
+            encoder_shape = (obs_shape[0] * 3, *obs_shape[1:])
+        self.encoder = PixelEncoder(encoder_shape, feature_dim, num_layers, num_filters,
+                                    output_logits=output_logits, goal_flag=not self.goal_set_conditioned).to(self.device)
         self.phi = self
 
         self.ground_space = ground_space
@@ -155,18 +161,18 @@ class PairedStateGoal(nn.Module):
 
 
 
-    def forward(self, obs, goal = None, detach=False):
+    def forward(self, obs, goal=None, goal_set=None, detach=False):
+        return self.encode(obs, goal, goal_set, detach=detach)
+
+    def encode(self, obs, goal=None, goal_set=None, detach=False):
         if goal is not None:
-            obs = torch.cat([obs, goal], dim = 1) 
-        return self.encode(obs, detach = detach)
-
-    def encode(self, obs, goal = None, detach=False):
-        if goal is not None:
-            obs = torch.cat([obs, goal], dim = 1) 
-
-        z_out = self.encoder(obs, detach = detach)
-
-        return z_out
+            if self.goal_set_conditioned:
+                if goal_set is None:
+                    raise ValueError("goal_set is required for a goal-set-conditioned phi")
+                obs = torch.cat([obs, goal, goal_set], dim=1)
+            else:
+                obs = torch.cat([obs, goal], dim=1)
+        return self.encoder(obs, detach=detach)
 
     def sample_compositionality_pool(self, replay_buffer):
         """Draws one pool P of n ~ Uniform{2,...,8} goal images from the replay buffer, to
@@ -322,13 +328,13 @@ class PairedStateGoal(nn.Module):
 
         return comp_loss, lambda_current
 
-    def encoder_loss(self, obs, action, next_obs, goal, reward, rtg, td, policy, step, log = True, beginning = 'train'):
+    def encoder_loss(self, obs, action, next_obs, goal, reward, rtg, td, policy, step, log = True, beginning = "train", goal_set=None):
         if self.on_policy_dynamics == 'probabilistic' and step > self.steps_till_on_policy:
-            action = policy.sample_action(obs, goal, batched = True)
+            action = policy.sample_action(obs, goal, batched=True, goal_set=goal_set)
         elif self.on_policy_dynamics == 'deterministic' and step > self.steps_till_on_policy:
-            action = policy.select_action(obs, goal, batched = True)
+            action = policy.select_action(obs, goal, batched=True, goal_set=goal_set)
 
-        z = self.encode(obs, goal)
+        z = self.encode(obs, goal, goal_set)
         perm = np.random.permutation(obs.shape[0])
         z_pair = z[perm]
         reward_pair = reward[perm]
@@ -372,14 +378,14 @@ class PairedStateGoal(nn.Module):
             td_pair = td[perm]
             metric = torch.norm(td - td_pair, dim = 1).squeeze() * self.action_weight
         elif self.metric_distance == 'advantage_target':
-            q1, q2 = policy.critic_target(obs, goal, action)
-            vs = policy.critic_target.forward_v(obs, goal).detach()
+            q1, q2 = policy.critic_target(obs, goal, action, goal_set=goal_set)
+            vs = policy.critic_target.forward_v(obs, goal, goal_set=goal_set).detach()
             adv = q1.detach() - vs
             adv_pair = adv[perm]
             metric = torch.norm(adv - adv_pair, dim = 1).squeeze() * self.action_weight
         elif self.metric_distance == 'advantage':
-            q1, q2 = policy.critic(obs, goal, action)
-            vs = policy.critic.forward_v(obs, goal).detach()
+            q1, q2 = policy.critic(obs, goal, action, goal_set=goal_set)
+            vs = policy.critic.forward_v(obs, goal, goal_set=goal_set).detach()
             adv = q1.detach() - vs
             adv_pair = adv[perm]
             metric = torch.norm(adv - adv_pair, dim = 1).squeeze() * self.action_weight
@@ -387,11 +393,11 @@ class PairedStateGoal(nn.Module):
             raise NotImplementedError
 
         if self.transition_model_type == 'next_observation':
-            z_next = self.encode(next_obs, goal)
+            z_next = self.encode(next_obs, goal, goal_set)
             z_next_pair = z_next[perm]
             transition_dist = torch.norm(z_next - z_next_pair, dim = 1)
         elif self.transition_model_type == 'next_observation_l1':
-            z_next = self.encode(next_obs, goal)
+            z_next = self.encode(next_obs, goal, goal_set)
             z_next_pair = z_next[perm]
             transition_dist = torch.norm(z_next - z_next_pair, p = 1, dim = 1)
         elif self.transition_model_type == 'deterministic':
@@ -412,23 +418,23 @@ class PairedStateGoal(nn.Module):
 
         return loss, std_norm, collapse_level
 
-    def policy_decoder(self, obs, action, next_obs, goal, reward, rtg, td, policy, step, beginning = 'train'):
+    def policy_decoder(self, obs, action, next_obs, goal, reward, rtg, td, policy, step, beginning = "train", goal_set=None):
         if self.on_policy_dynamics == 'probabilistic' and step > self.steps_till_on_policy:
-            action = policy.sample_action(obs, goal, batched = True)
+            action = policy.sample_action(obs, goal, batched=True, goal_set=goal_set)
         elif self.on_policy_dynamics == 'deterministic' and step > self.steps_till_on_policy:
-            action = policy.select_action(obs, goal, batched = True)
+            action = policy.select_action(obs, goal, batched=True, goal_set=goal_set)
 
-        z = self.encode(obs, goal).detach()
+        z = self.encode(obs, goal, goal_set).detach()
         pred_action = self.policy_decoder(z) #Inverse Model
         policy_decoder_loss = F.mse_loss(pred_action.squeeze(), action.squeeze())
 
         return policy_decoder_loss
 
-    def transition_loss(self, obs, action, next_obs, goal, reward, rtg, td, policy, step, beginning = 'train'):
+    def transition_loss(self, obs, action, next_obs, goal, reward, rtg, td, policy, step, beginning = "train", goal_set=None):
         if self.transition_model_type == 'next_observation' or self.transition_model_type == 'next_observation_l1':
             return torch.Tensor([0]).to(self.device)
 
-        z = self.encode(obs, goal)
+        z = self.encode(obs, goal, goal_set)
         dyn_input = z
 
         pred_next_latent_mu, pred_next_latent_sigma = self.dynamics_model(torch.cat([dyn_input, action], dim=1))
@@ -437,7 +443,7 @@ class PairedStateGoal(nn.Module):
 
         pred_next_latent_sigma_inv = torch.exp(-pred_next_latent_sigma)
 
-        next_z = self.encode(next_obs, goal)
+        next_z = self.encode(next_obs, goal, goal_set)
         if self.dynamics_loss == 'direct':
             diff = ((pred_next_latent_mu - next_z.detach()) ** 2 * pred_next_latent_sigma_inv) + pred_next_latent_sigma
         elif self.dynamics_loss == 'delta':
@@ -464,14 +470,14 @@ class PairedStateGoal(nn.Module):
 
         return total_loss 
 
-    def decoder_loss(self, obs, action, next_obs, goal, reward, rtg, td, policy, step, beginning = 'train'):
+    def decoder_loss(self, obs, action, next_obs, goal, reward, rtg, td, policy, step, beginning = "train", goal_set=None):
         if self.on_policy_dynamics == 'probabilistic' and step > self.steps_till_on_policy and not self.decode_both:
-            action = policy.sample_action(obs, goal, batched = True)
+            action = policy.sample_action(obs, goal, batched=True, goal_set=goal_set)
         elif self.on_policy_dynamics == 'deterministic' and step > self.steps_till_on_policy and not self.decode_both:
-            action = policy.select_action(obs, goal, batched = True)
+            action = policy.select_action(obs, goal, batched=True, goal_set=goal_set)
 
-        z = self.encode(obs, goal)
-        next_z = self.encode(next_obs, goal)
+        z = self.encode(obs, goal, goal_set)
+        next_z = self.encode(next_obs, goal, goal_set)
         if self.transition_model_type != 'next_observation':
             decodee = self.dynamics_model.sample_prediction(torch.cat([z, action], dim=1))
         else:
@@ -505,14 +511,14 @@ class PairedStateGoal(nn.Module):
 
         return decoder_loss
 
-    def train_batch(self, obs, action, next_obs, goal, reward, rtg, td, policy, step, log = True, take_step = True, beginning = 'train', comp_pool_imgs = None):
+    def train_batch(self, obs, action, next_obs, goal, reward, rtg, td, policy, step, log = True, take_step = True, beginning = "train", comp_pool_imgs=None, goal_set=None):
 
         action = torch.clip(action, min = -1, max = 1) * self.action_scale
 
         #self.encoder.train()
-        encoder_loss, std_norm, collapse_level = self.encoder_loss(obs, action, next_obs, goal, reward, rtg, td, policy, step, log = log, beginning = beginning)
-        transition_loss = self.transition_loss(obs, action, next_obs, goal, reward, rtg, td, policy, step, beginning = beginning)
-        decoder_loss = self.decoder_loss(obs, action, next_obs, goal, reward, rtg, td, policy, step, beginning = beginning)
+        encoder_loss, std_norm, collapse_level = self.encoder_loss(obs, action, next_obs, goal, reward, rtg, td, policy, step, log=log, beginning=beginning, goal_set=goal_set)
+        transition_loss = self.transition_loss(obs, action, next_obs, goal, reward, rtg, td, policy, step, beginning=beginning, goal_set=goal_set)
+        decoder_loss = self.decoder_loss(obs, action, next_obs, goal, reward, rtg, td, policy, step, beginning=beginning, goal_set=goal_set)
 
         #policy_decoder_loss = self.policy_decoder_loss(obs, action, next_obs, goal, reward, rtg, td, policy, step, beginning = beginning)
 
@@ -575,7 +581,7 @@ class PairedStateGoal(nn.Module):
     def eval_loss(self, replay_buffer, policy, kwargs, step, log = True):
         comp_pool_imgs = self.sample_compositionality_pool(replay_buffer) if self.lambda_comp > 0 else None
         self.train_batch(kwargs['obs'], kwargs['action'], kwargs['next_obs'], kwargs['goal'], kwargs['reward'], \
-            kwargs['rtg'], kwargs['td'], policy, step, log = log, take_step = False, beginning = 'eval', comp_pool_imgs = comp_pool_imgs)
+            kwargs['rtg'], kwargs['td'], policy, step, log=log, take_step=False, beginning="eval", comp_pool_imgs=comp_pool_imgs, goal_set=kwargs.get("goal_set"))
 
     def update(self, replay_buffer, policy, kwargs, step, log = True):
         #Will run through dataset...
@@ -584,12 +590,12 @@ class PairedStateGoal(nn.Module):
 
         comp_pool_imgs = self.sample_compositionality_pool(replay_buffer) if self.lambda_comp > 0 else None
         self.train_batch(kwargs['obs'], kwargs['action'], kwargs['next_obs'], kwargs['goal'], \
-            kwargs['reward'], kwargs['rtg'], kwargs['td'], policy, step, log = log, comp_pool_imgs = comp_pool_imgs)
+            kwargs['reward'], kwargs['rtg'], kwargs['td'], policy, step, log=log, comp_pool_imgs=comp_pool_imgs, goal_set=kwargs.get("goal_set"))
 
         for _ in range(self.train_iters_per_update - 1):
             obs, action, _, reward, next_obs, not_done, goals, kwargs = replay_buffer.sample()
             comp_pool_imgs = self.sample_compositionality_pool(replay_buffer) if self.lambda_comp > 0 else None
-            self.train_batch(obs, action, next_obs, goals, reward, kwargs['rtg'], kwargs['td'], policy, step, log = log, comp_pool_imgs = comp_pool_imgs)
+            self.train_batch(obs, action, next_obs, goals, reward, kwargs['rtg'], kwargs['td'], policy, step, log=log, comp_pool_imgs=comp_pool_imgs, goal_set=kwargs.get("goal_set"))
 
 
 

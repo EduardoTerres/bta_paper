@@ -51,11 +51,13 @@ class GoalBisim(nn.Module):
             weight_decay_paired = 0,
             lambda_comp = 1.0,
             beta_comp = 1.0,
-            lambda_comp_warmup_steps = 10000):
+            lambda_comp_warmup_steps = 10000,
+            goal_set_conditioned = False):
         super().__init__()
 
         self.using_phi = using_phi
         self.device = device
+        self.goal_set_conditioned = goal_set_conditioned
         self.psi = PixelEncoder(obs_shape, feature_dim, num_layers, num_filters, output_logits = output_logits).to(self.device)
         self.encoder = self.psi
         self.feature_dim = feature_dim
@@ -80,7 +82,7 @@ class GoalBisim(nn.Module):
                 metric_loss = metric_loss, train_iters_per_update = train_iters_per_update_phi, num_filters = num_filters_paired, lr=lr_paired, \
                 action_shape = action_shape, on_policy_dynamics = on_policy_dynamics, action_weight = action_weight, steps_till_on_policy = steps_till_on_policy, \
                 action_scale = action_scale, output_logits = output_logits_paired, weight_decay = weight_decay_paired,  encoder_weight = encoder_weight, transition_weight = transition_weight, \
-                ground_space = ground_space, lambda_comp = lambda_comp, beta_comp = beta_comp, lambda_comp_warmup_steps = lambda_comp_warmup_steps)
+                ground_space=ground_space, lambda_comp=lambda_comp, beta_comp=beta_comp, lambda_comp_warmup_steps=lambda_comp_warmup_steps, goal_set_conditioned=goal_set_conditioned)
             try:
                 self.psi_optimizer = torch.optim.AdamW(self.psi.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -107,11 +109,11 @@ class GoalBisim(nn.Module):
 
         return z_out
 
-    def loss(self, obs, action, next_obs, goal, reward, policy, step, log = True, beginning = 'train', detach_paired = True):
-        delta_z = self.phi(obs, goal) #Maybe there should be some cross talk???
+    def loss(self, obs, action, next_obs, goal, reward, policy, step, log=True, beginning="train", detach_paired=True, goal_set=None):
+        delta_z = self.phi(obs, goal, goal_set) #Maybe there should be some cross talk???
 
         if self.ground_space:
-            delta_z -= self.phi(goal, goal)
+            delta_z -= self.phi(goal, goal, goal_set)
 
         if detach_paired:
             delta_z = delta_z.detach()
@@ -200,10 +202,10 @@ class GoalBisim(nn.Module):
 
         return loss
 
-    def train_batch(self, obs, action, next_obs, goal, reward, policy, step, log = True, take_step = True, beginning = 'train'):
+    def train_batch(self, obs, action, next_obs, goal, reward, policy, step, log=True, take_step=True, beginning="train", goal_set=None):
 
         #self.model.train()
-        loss = self.loss(obs, action, next_obs, goal, reward, policy, step, log = log, beginning = beginning)
+        loss = self.loss(obs, action, next_obs, goal, reward, policy, step, log=log, beginning=beginning, goal_set=goal_set)
 
         stats = {'step' : step,
         beginning + '/psi/loss' : loss.item()
@@ -227,7 +229,7 @@ class GoalBisim(nn.Module):
 
     def eval_loss(self, replay_buffer, policy, kwargs, step, log = True):
         self.train_batch(kwargs['obs'], kwargs['action'], kwargs['next_obs'], kwargs['goal'], kwargs['reward'], \
-            policy, step, log = log, take_step = False, beginning = 'eval')
+            policy, step, log=log, take_step=False, beginning="eval", goal_set=kwargs.get("goal_set"))
 
         self.phi.eval_loss(replay_buffer, policy, kwargs, step, log = True)
 
@@ -244,10 +246,10 @@ class GoalBisim(nn.Module):
 
         if self.phi_updates_before_psi <= 0:
             if not self.disconnect_psi:
-                self.train_batch(kwargs['obs'], kwargs['action'], kwargs['next_obs'], kwargs['goal'], kwargs['reward'], policy, step, log = log)
+                self.train_batch(kwargs['obs'], kwargs['action'], kwargs['next_obs'], kwargs['goal'], kwargs['reward'], policy, step, log=log, goal_set=kwargs.get("goal_set"))
                 for _ in range(self.train_iters_per_update - 1):
                     obs, action, _, reward, next_obs, not_done, goals, kwargs = replay_buffer.sample()
-                    self.train_batch(obs, action, next_obs, goals, reward, policy, step, log = log)
+                    self.train_batch(obs, action, next_obs, goals, reward, policy, step, log=log, goal_set=kwargs.get("goal_set"))
 
 
 

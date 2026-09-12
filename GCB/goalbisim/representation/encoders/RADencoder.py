@@ -63,6 +63,8 @@ class PixelEncoder(nn.Module):
             out_dim = 8192
         elif num_layers == 6 and num_filters == 32 and obs_shape[1] == 70:
             out_dim = 18432
+        elif num_layers == 3 and num_filters == 32 and obs_shape[1] == 64:
+            out_dim = 23328
         else:
             raise NotImplementedError
            # out_dim = 39200
