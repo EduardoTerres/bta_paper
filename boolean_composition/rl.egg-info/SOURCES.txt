@@ -1,4 +1,3 @@
-README.md
 pyproject.toml
 boxman_dts/dqn.py
 boxman_dts/draw_map.py
@@ -25,6 +24,9 @@ boxman_sts/shortest.py
 boxman_sts/trainer.py
 boxman_sts/wrappers.py
 boxman_sts/extension/exp_convergence.py
+boxman_sts/extension/exp_convergence_old.py
+boxman_sts/extension/make_plots.py
+boxman_sts/extension/plot_utils.py
 boxman_sts/extension/test_uvfa_composition.py
 boxman_sts/gym_repoman/__init__.py
 boxman_sts/gym_repoman/envs/__init__.py

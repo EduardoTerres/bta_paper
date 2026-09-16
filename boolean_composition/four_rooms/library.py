@@ -231,6 +231,12 @@ def EQ_P(EQ, goal=None):
             # P[state] = np.random.choice(np.flatnonzero(v == v.max()))
         else:
             Vs = [EQ[state][goal] for goal in EQ[state].keys()]
+            if len(Vs) == 0:
+                # No goal recorded yet for this state (e.g. mid-training,
+                # before the first episode has terminated) -- leave it at
+                # the defaultdict's default action rather than crashing on
+                # np.max of an empty array.
+                continue
             P[state] = np.argmax(np.max(Vs, axis=0))
             # v = np.max(Vs,axis=0)
             # P[state] = np.random.choice(np.flatnonzero(v == v.max()))

@@ -1,3 +1,4 @@
+import os
 from collections import defaultdict
 from four_rooms.GridWorld import GridWorld
 from four_rooms.library import (
@@ -294,6 +295,198 @@ def plot_extended_q_value(learned_EQ, goals, terminal_states, num_rooms: int, sa
     fig = env.render(P=EQ_P(learned_EQ), V=EQ_V(learned_EQ), no_ticks=True)
     fig.tight_layout()
     fig.savefig(save_name + "_all.png", bbox_inches='tight', pad_inches=0.1)
+
+
+# ------------------------------------------------------------
+# Stochastic sweep: shared styling for the three sweep figures
+# ------------------------------------------------------------
+SWEEP_COMPOSED_METHODS = ["onoff", "boolean"]
+SWEEP_OWN_METHODS = ["universal", "empty", "base_tasks"]
+SWEEP_LABELS = {
+    "onoff": "Goal-set composition (ours)",
+    "boolean": "Original BTA composition",
+    "universal": "Universal task",
+    "empty": "Empty task",
+    "base_tasks": "Base tasks",
+    "optimal": "Optimal $V^*$",
+}
+SWEEP_LINESTYLES = {
+    "onoff": "-", "boolean": "-",
+    "universal": "--", "empty": "--", "base_tasks": "--",
+    "optimal": ":",
+}
+SWEEP_MARKERS = {
+    "onoff": "o", "boolean": "o",
+    "universal": "s", "empty": "^", "base_tasks": "D",
+    "optimal": "",
+}
+SWEEP_COLORS = dict(
+    zip(SWEEP_COMPOSED_METHODS + SWEEP_OWN_METHODS, plt.cm.tab10.colors)
+)
+SWEEP_COLORS["optimal"] = "black"
+
+
+def _save_sweep_figure(fig, save_name):
+    """Write the figure as both .png and .pdf, as `boxman_sts` does.
+
+    The PDF is the one to \\includegraphics in the paper -- vector, so the
+    LaTeX-rendered text stays sharp at any size -- while the PNG stays handy
+    for quick viewing. `save_name` may carry either extension.
+    """
+    base = os.path.splitext(save_name)[0]
+    for suffix in (".png", ".pdf"):
+        fig.savefig(base + suffix)
+
+
+# Type sizes shared by the three sweep figures.
+SWEEP_LABEL_SIZE = 24
+SWEEP_TICK_SIZE = 20
+SWEEP_LEGEND_SIZE = 15
+
+
+def _set_sweep_style():
+    """Render the sweep figures' text with LaTeX, as the Boxman plots do.
+
+    Any literal '%' in a label must be written '\\%' once this is on -- bare
+    '%' starts a comment in LaTeX and silently swallows the rest of the string.
+    """
+    rc("text", usetex=True)
+    rc("font", family="serif")
+
+
+def _plot_sweep_panel(ax, results, slip_probs, methods, ylabel, title, scale=1.0):
+    """One slip-probability panel. `results` is slip_prob -> method -> values.
+
+    Shading is +/- 1 SEM over whatever the per-slip lists hold -- per-seed
+    scalars after aggregation, so the band reflects seed-to-seed variance.
+    """
+    for method in methods:
+        if method not in results[slip_probs[0]]:
+            continue
+        values = [np.asarray(results[p][method], dtype=float) for p in slip_probs]
+        means = np.array([scale * v.mean() for v in values])
+        sems = np.array([scale * v.std() / max(len(v), 1) ** 0.5 for v in values])
+        ax.plot(
+            slip_probs, means,
+            linestyle=SWEEP_LINESTYLES[method], marker=SWEEP_MARKERS[method],
+            color=SWEEP_COLORS[method], linewidth=2, markersize=6,
+            label=SWEEP_LABELS[method],
+        )
+        ax.fill_between(
+            slip_probs, means - sems, means + sems,
+            color=SWEEP_COLORS[method], alpha=0.15,
+        )
+    ax.set_xlabel("Slip probability $p$", fontsize=SWEEP_LABEL_SIZE)
+    ax.set_ylabel(ylabel, fontsize=SWEEP_LABEL_SIZE)
+    if title:
+        ax.set_title(title, fontsize=14)
+    ax.tick_params(axis="both", labelsize=SWEEP_TICK_SIZE)
+    ax.legend(fontsize=SWEEP_LEGEND_SIZE)
+
+
+def plot_stochastic_sweep_gap(results: dict[float, dict[str, list[float]]], save_name: str):
+    """Figure 2 of 3: the value gap V* - V^pi, in units of episode return.
+
+    The same comparison as `plot_stochastic_sweep` without the per-state
+    normalization. Both methods are measured against the same V* at each slip
+    probability, so the lines can be read against each other directly, and
+    since a step costs 0.1 a gap of 0.4 is "about four wasted steps' worth".
+    Nothing here can blow up or flip sign, which is the point: the normalized
+    view divides by |V*(s)|, and V*(s) passes through zero on tasks with few
+    goals.
+    """
+    _set_sweep_style()
+    fig, ax = plt.subplots(figsize=(8, 6))
+    _plot_sweep_panel(
+        ax, results, sorted(results),
+        SWEEP_COMPOSED_METHODS + SWEEP_OWN_METHODS,
+        ylabel="Return",
+        title=None,
+    )
+    plt.tight_layout()
+    _save_sweep_figure(fig, save_name)
+    plt.close(fig)
+
+
+def plot_stochastic_sweep_returns(results: dict[float, dict[str, list[float]]], save_name: str):
+    """Figure 3 of 3: mean return of actual rollout episodes.
+
+    The Monte Carlo counterpart of the other two figures -- the composed
+    policies are rolled out in the real env under slip and their returns
+    averaged, rather than solved for. Agreement with the DP gap is a check
+    that the closed-form dynamics match the environment.
+
+    No optimal reference line: it cannot be `V*` (a value, not a policy that
+    can be rolled out), and rolling out the stationary policy greedy w.r.t.
+    `V_H` labels a slight underestimate of the optimum as "optimal". The gap
+    figure already shows distance from the optimum exactly.
+    """
+    _set_sweep_style()
+    fig, ax = plt.subplots(figsize=(8, 6))
+    _plot_sweep_panel(
+        ax, results, sorted(results),
+        SWEEP_COMPOSED_METHODS + SWEEP_OWN_METHODS,
+        ylabel="Return",
+        title=None,
+    )
+    plt.tight_layout()
+    _save_sweep_figure(fig, save_name)
+    plt.close(fig)
+
+
+def plot_stochastic_sweep(results: dict[float, dict[str, list[float]]], save_name: str):
+    """Plot normalized suboptimality (V* - V^method) / V* vs slip probability,
+    shaded by +/- 1 SEM across tasks.
+
+    Two families of lines are drawn, if present in `results`:
+      - Composed-task methods ("onoff"/"boolean", solid): suboptimality of
+        the zero-shot composed policy, averaged over held-out composed tasks.
+      - Own-task baselines ("universal"/"empty"/"base_tasks", dashed): each
+        constituent EQ evaluated on the very task it was trained on -- no
+        composition involved. This isolates how much suboptimality is
+        already present from imperfect Goal-Oriented Q-learning under slip,
+        as opposed to being introduced by the composition step itself.
+
+    Args:
+        results: slip_prob -> method -> list of normalized suboptimalities.
+        save_name: path to save the figure.
+    """
+    slip_probs = sorted(results.keys())
+    composed_methods = [m for m in ["onoff", "boolean"] if m in results[slip_probs[0]]]
+    own_methods = [m for m in ["universal", "empty", "base_tasks"] if m in results[slip_probs[0]]]
+    methods = composed_methods + own_methods
+
+    labels = {
+        "onoff": "Goal-set composition (ours)",
+        "boolean": "Original BTA composition",
+        "universal": "Universal task",
+        "empty": "Empty task",
+        "base_tasks": "Base tasks",
+    }
+    linestyles = {"onoff": "-", "boolean": "-", "universal": "--", "empty": "--", "base_tasks": "--"}
+    markers = {"onoff": "o", "boolean": "o", "universal": "s", "empty": "^", "base_tasks": "D"}
+    colors = dict(zip(methods, plt.cm.tab10.colors))
+
+    _set_sweep_style()
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for method in methods:
+        values = [results[p][method] for p in slip_probs]
+        means = np.array([100 * np.mean(v) for v in values])
+        sems = np.array([100 * np.std(v) / max(len(v), 1) ** 0.5 for v in values])
+        ax.plot(
+            slip_probs, means,
+            linestyle=linestyles[method], marker=markers[method],
+            color=colors[method], linewidth=2, markersize=6, label=labels[method],
+        )
+        ax.fill_between(slip_probs, means - sems, means + sems, color=colors[method], alpha=0.15)
+
+    ax.set_xlabel("Slip probability $p$", fontsize=SWEEP_LABEL_SIZE)
+    ax.set_ylabel(r"Normalized suboptimality (\%)", fontsize=SWEEP_LABEL_SIZE)
+    ax.tick_params(axis='both', labelsize=SWEEP_TICK_SIZE)
+    ax.legend(fontsize=SWEEP_LEGEND_SIZE)
+    plt.tight_layout()
+    _save_sweep_figure(fig, save_name)
+    plt.close(fig)
 
 
 def plot_returns_optimality_all_num_goals(

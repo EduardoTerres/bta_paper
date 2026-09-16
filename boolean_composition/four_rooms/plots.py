@@ -1,3 +1,5 @@
+import glob
+
 import numpy as np
 from collections import defaultdict
 from matplotlib import pyplot as plt
@@ -261,7 +263,10 @@ def plot5():
 
     n = 2
 
-    for i in range(4):
+    # One file per slip probability swept by exp4.py/exp5.py, discovered from
+    # disk rather than hardcoded so the two stay in step as the sweep grows.
+    num_slip_probs = len(glob.glob("exps_data/exp5_returns_*.h5"))
+    for i in range(num_slip_probs):
         data0 = dd.io.load("exps_data/exp5_returns_" + str(i) + ".h5")[:1000, :]
         data1 = dd.io.load("exps_data/exp4_returns_" + str(i) + ".h5")[:1000, :]
 

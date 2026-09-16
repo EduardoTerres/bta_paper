@@ -4,6 +4,7 @@ from collections import defaultdict
 import random
 import time
 import matplotlib
+import numpy as np
 from four_rooms.GridWorld import GridWorld
 from four_rooms.library import (
     EQ_P,
@@ -228,3 +229,56 @@ def proportional_sample(tasks: list[list[tuple[int, int]]], total_samples: int):
         )
 
     return sampled_tasks
+
+
+def _convergence_task_sort_key(task: str):
+    """Orders convergence-table rows as universal, empty, base_task_0, base_task_1, ..."""
+    if task == "universal":
+        return (0, 0)
+    if task == "empty":
+        return (1, 0)
+    return (2, int(task.rsplit("_", 1)[-1]))  # "base_task_{i}" -> i
+
+
+def write_convergence_table(records: list[dict], save_name: str):
+    """Write a plain-text table of how many training steps each constituent
+    EQ (universal / empty / each base task) took to converge, aggregated
+    across seeds and broken down by slip probability.
+
+    Args:
+        records: list of {"seed", "slip_prob", "task", "steps", "converged",
+            "final_subopt"} dicts -- one per (seed, slip_prob, task) training
+            run, e.g. as produced by `mdp_utils.train_goal_oriented_until_convergence`.
+        save_name: path to write the table to.
+    """
+    groups = defaultdict(list)
+    for r in records:
+        groups[(r["slip_prob"], r["task"])].append(r)
+
+    keys = sorted(groups.keys(), key=lambda k: (k[0], _convergence_task_sort_key(k[1])))
+
+    columns = ["slip_prob", "task", "converged", "mean_steps", "std_steps", "mean_final_subopt_%"]
+    widths = [9, 14, 16, 12, 11, 20]
+    header = " | ".join(c.rjust(w) for c, w in zip(columns, widths))
+    sep = "-+-".join("-" * w for w in widths)
+    lines = [header, sep]
+
+    for slip_prob, task in keys:
+        rs = groups[(slip_prob, task)]
+        n_seeds = len(rs)
+        n_converged = sum(1 for r in rs if r["converged"])
+        steps = np.array([r["steps"] for r in rs], dtype=float)
+        subopt = np.array([r["final_subopt"] for r in rs], dtype=float)
+        row = [
+            f"{slip_prob:.2f}",
+            task,
+            f"{n_converged}/{n_seeds}",
+            f"{steps.mean():.1f}",
+            f"{steps.std():.1f}",
+            f"{100 * subopt.mean():.4f}",
+        ]
+        lines.append(" | ".join(c.rjust(w) for c, w in zip(row, widths)))
+
+    with open(save_name, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"Convergence table saved to {save_name}")

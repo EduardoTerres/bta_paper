@@ -39,7 +39,7 @@ types = [(True, True), (True, False), (False, True), (False, False)]
 t = 3  # Dense rewards, not same terminal states
 
 # Slip probabilities
-slip_probs = [0, 0.1, 0.2, 0.3]
+slip_probs = [round(0.1 * i, 2) for i in range(10)]  # 0.0 .. 0.9
 
 epsilon = 0.5
 alpha = 0.1

@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 
 import matplotlib
 import numpy as np
@@ -310,3 +311,230 @@ def _draw_policy_arrows(ax, policy_map, image_shape):
         )
     if stay_xs:
         ax.scatter(stay_xs, stay_ys, s=8, c="black", marker="o", zorder=4)
+
+
+# ------------------------------------------------------------
+# Stochastic sweep (exp_stochastic_sweep.py)
+# ------------------------------------------------------------
+SWEEP_COMPOSED_METHODS = ["onoff", "boolean"]
+SWEEP_OWN_METHODS = ["universal", "empty", "base_tasks"]
+SWEEP_LABELS = {
+    "onoff": "Univ./Empty (Ours)",
+    "boolean": "Base Tasks",
+    "universal": "Universal task",
+    "empty": "Empty task",
+    "base_tasks": "Base tasks",
+    "optimal": "Optimal ($V^*$)",
+}
+SWEEP_COLORS = {
+    "onoff": "#1A5276",
+    "boolean": "#C0560A",
+    "universal": "#7F8C8D",
+    "empty": "#9B59B6",
+    "base_tasks": "#27AE60",
+    "optimal": "#000000",
+}
+SWEEP_MARKERS = {
+    "onoff": "o",
+    "boolean": "o",
+    "universal": "s",
+    "empty": "^",
+    "base_tasks": "D",
+    "optimal": "",
+}
+SWEEP_LINESTYLES = {
+    "onoff": "-",
+    "boolean": "-",
+    "universal": "--",
+    "empty": "--",
+    "base_tasks": "--",
+    "optimal": ":",
+}
+
+
+def plot_stochastic_sweep(aggregated, figure_path):
+    """Two views of the slip sweep, sharing an x axis.
+
+    Args:
+        aggregated: metric -> slip_prob -> method -> list of per-seed scalars,
+            as produced by `exp_stochastic_sweep.run_aggregate`. Shading is
+            +/- 1 SEM across seeds.
+        figure_path: where to write the figure (.png and .pdf are both saved).
+
+    Panels:
+      - The value gap V* - V^pi, in units of episode return. This is the
+        comparison the experiment is actually making: at a fixed slip
+        probability the two composition methods are measured against the same
+        V*, in the same units, so their lines can be read against each other
+        directly. The dashed own-task lines are the control for "everything
+        gets harder as slip rises" -- if the composed gaps grow no faster than
+        those, the composition is not what broke.
+      - The raw expected return behind those gaps, with V* drawn in, so the
+        shrinking headroom at high slip is visible rather than implied.
+
+    `aggregated` also carries `regret` and `subopt`; neither is plotted (see
+    the module docstring of exp_stochastic_sweep.py for why).
+    """
+    slip_probs = sorted(aggregated["gap"])
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+
+    _plot_sweep_panel(
+        axes[0], aggregated["gap"], slip_probs,
+        SWEEP_COMPOSED_METHODS + SWEEP_OWN_METHODS, scale=1,
+        ylabel="Value gap $V^* - V^\\pi$ (return)",
+        title="Expected return given up",
+    )
+    _plot_sweep_panel(
+        axes[1], aggregated["returns"], slip_probs,
+        SWEEP_COMPOSED_METHODS + ["optimal"], scale=1,
+        ylabel="Expected episode return",
+        title="Raw expected return",
+    )
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    optimal_handles, optimal_labels = axes[1].get_legend_handles_labels()
+    for handle, label in zip(optimal_handles, optimal_labels):
+        if label not in labels:
+            handles.append(handle)
+            labels.append(label)
+    fig.legend(handles, labels, loc="upper center", ncol=3, fontsize=13)
+    fig.tight_layout(rect=(0, 0, 1, 0.86))
+    _save_figure(fig, figure_path)
+    plt.close(fig)
+
+
+SWEEP_LABEL_SIZE = 24
+SWEEP_TICK_SIZE = 20
+SWEEP_LEGEND_SIZE = 15
+
+
+def _plot_sweep_panel(ax, results, slip_probs, methods, scale, ylabel, title, zero_line=True,
+                      label_size=16, tick_size=12):
+    for method in methods:
+        if method not in results[slip_probs[0]]:
+            continue
+        values = [np.asarray(results[p][method], dtype=float) for p in slip_probs]
+        means = np.array([scale * v.mean() for v in values])
+        sems = np.array([scale * v.std() / max(len(v), 1) ** 0.5 for v in values])
+        ax.plot(
+            slip_probs, means,
+            linestyle=SWEEP_LINESTYLES[method],
+            marker=SWEEP_MARKERS[method],
+            color=SWEEP_COLORS[method],
+            linewidth=2, markersize=6,
+            label=SWEEP_LABELS[method],
+        )
+        ax.fill_between(slip_probs, means - sems, means + sems, color=SWEEP_COLORS[method], alpha=0.15)
+    if zero_line:
+        ax.axhline(0, color="black", linestyle="--", linewidth=0.8)
+    ax.set_xlabel("Slip probability $p$", fontsize=label_size)
+    ax.set_ylabel(ylabel, fontsize=label_size)
+    if title:
+        ax.set_title(title, fontsize=14)
+    ax.tick_params(axis="both", labelsize=tick_size)
+
+
+def _single_panel_sweep(aggregated_metric, figure_path, methods, ylabel, title):
+    """One standalone slip-sweep figure drawn with the shared panel styling."""
+    _set_style()  # LaTeX text, as the other Boxman figures use
+    slip_probs = sorted(aggregated_metric)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    _plot_sweep_panel(
+        ax, aggregated_metric, slip_probs, methods, scale=1,
+        ylabel=ylabel, title=title, zero_line=False,
+        label_size=SWEEP_LABEL_SIZE, tick_size=SWEEP_TICK_SIZE,
+    )
+    ax.legend(fontsize=SWEEP_LEGEND_SIZE)
+    fig.tight_layout()
+    _save_figure(fig, figure_path)
+    plt.close(fig)
+
+
+def plot_stochastic_sweep_gap(aggregated, figure_path):
+    """The value gap V* - V^pi on its own, in units of episode return.
+
+    The same data as the left panel of `plot_stochastic_sweep`, drawn alone so
+    it can be used as a standalone figure. Both composition methods are
+    measured against the same V* at each slip probability, so the lines can be
+    read against each other directly; the dashed own-task lines are the
+    control for "everything gets harder as slip rises".
+    """
+    _single_panel_sweep(
+        aggregated["gap"], figure_path,
+        SWEEP_COMPOSED_METHODS + SWEEP_OWN_METHODS,
+        ylabel="Return",
+        title=None,
+    )
+
+
+def plot_stochastic_sweep_returns(aggregated, figure_path):
+    """Mean return of actual rollout episodes.
+
+    The Monte Carlo counterpart of the DP figures: the composed policies are
+    rolled out in the real Boxman env under slip and their returns averaged,
+    rather than solved for. Agreement with the `returns` panel of
+    `plot_stochastic_sweep` is a check that the closed-form dynamics in
+    `mdp_utils` match the environment.
+
+    No optimal reference line here: `V*` is a value, not a policy that can be
+    rolled out, and the stationary policy greedy w.r.t. `V_H` is a slight
+    underestimate of it. The DP panels carry the exact optimum instead.
+    """
+    _single_panel_sweep(
+        aggregated["rollout"], figure_path,
+        SWEEP_COMPOSED_METHODS + SWEEP_OWN_METHODS,
+        ylabel="Return",
+        title=None,
+    )
+
+
+TRAINING_TABLE_COLUMNS = [
+    ("slip_prob", 9),
+    ("task", 8),
+    ("seeds", 7),
+    ("train_steps", 12),
+    ("own_gap", 12),
+    ("own_regret_%", 14),
+    ("own_return", 12),
+    ("optimal_return", 15),
+]
+
+
+def write_training_table(records, path):
+    """Plain-text table of each constituent UVFA's own-task quality.
+
+    The counterpart of the Rooms sweep's convergence table: a DQN is trained
+    for a fixed budget rather than to convergence, so what is worth tabulating
+    is not how long it took but how good it ended up -- on the very task it was
+    trained on, with no composition involved -- at each slip probability.
+
+    Args:
+        records: dicts with "seed", "slip_prob", "task", "steps", "own_gap",
+            "own_regret", "own_return" and "optimal_return", one per
+            (seed, slip probability, constituent task).
+        path: where to write the table.
+    """
+    groups = {}
+    for record in records:
+        groups.setdefault((float(record["slip_prob"]), str(record["task"])), []).append(record)
+
+    header = " | ".join(name.rjust(width) for name, width in TRAINING_TABLE_COLUMNS)
+    lines = [header, "-+-".join("-" * width for _, width in TRAINING_TABLE_COLUMNS)]
+    for slip_prob, task in sorted(groups):
+        rows = groups[(slip_prob, task)]
+        values = [
+            f"{slip_prob:.2f}",
+            task,
+            str(len(rows)),
+            f"{np.mean([r['steps'] for r in rows]):.0f}",
+            f"{np.mean([r['own_gap'] for r in rows]):.3f}",
+            f"{100 * np.mean([r['own_regret'] for r in rows]):.2f}",
+            f"{np.mean([r['own_return'] for r in rows]):.3f}",
+            f"{np.mean([r['optimal_return'] for r in rows]):.3f}",
+        ]
+        lines.append(" | ".join(v.rjust(width) for v, (_, width) in zip(values, TRAINING_TABLE_COLUMNS)))
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+    print(f"Training table saved to {path}")
