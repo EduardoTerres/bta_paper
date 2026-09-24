@@ -25,6 +25,16 @@ uv run python four_rooms/extension/plots.py                # figures 2-6
 
 Set the map size with the `NUM_ROOMS` constant at the top of each of those files (4, 8 or 16).
 
+### GCB experiment (Four Rooms)
+
+Run the Four Rooms GCB setup with:
+
+```
+uv run python four_rooms/extension/exp2_comparison.py
+```
+
+Use `NUM_ROOMS = 4` in `four_rooms/extension/exp2_comparison.py`.
+
 ### Stochastic sweep
 
 Slip probability 0.0 to 0.9, three seeds.
